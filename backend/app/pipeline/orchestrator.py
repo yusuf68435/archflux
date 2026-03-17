@@ -28,7 +28,7 @@ from app.pipeline.vectorizer import vectorize_elements
 def run_full_pipeline(
     job_id: str,
     image_url: str,
-    crop_region_config: dict | None = None,
+    crop_region: dict | None = None,
     progress_callback: Callable | None = None,
 ) -> dict:
     """Run the complete facade-to-DXF conversion pipeline."""
@@ -44,8 +44,8 @@ def run_full_pipeline(
     image_data = download_file(bucket, key)
     image = load_image_from_bytes(image_data)
 
-    if crop_region_config:
-        image = crop_region(image, crop_region_config)
+    if crop_region:
+        image = crop_region(image, crop_region)
 
     report(5, "preprocessing")
     image = preprocess_image(image)
