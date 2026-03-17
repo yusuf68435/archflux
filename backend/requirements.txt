@@ -12,12 +12,12 @@ boto3==1.36.26
 pillow==11.1.0
 opencv-python-headless==4.11.0.86
 scikit-image==0.25.2
-numpy==2.2.4
+numpy>=1.24.0,<3.0.0
 ezdxf==1.4.2
 ultralytics==8.3.94
-torch==2.6.0
-torchvision==0.21.0
-segment-anything-2==0.1.0
+torch>=2.3.0
+torchvision>=0.18.0
+git+https://github.com/facebookresearch/segment-anything-2.git
 httpx==0.28.1
 pytest==8.3.5
 pytest-asyncio==0.25.3
