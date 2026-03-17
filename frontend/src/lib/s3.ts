@@ -5,6 +5,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
+// Internal client for server-side operations (reads/writes directly to MinIO)
 const s3Client = new S3Client({
   endpoint: process.env.S3_ENDPOINT || "http://localhost:9000",
   region: "us-east-1",
@@ -14,6 +15,20 @@ const s3Client = new S3Client({
   },
   forcePathStyle: true,
 });
+
+// Public client for generating presigned URLs (signed for the public domain)
+// Browser will PUT directly to this URL via nginx → MinIO proxy
+const s3PublicClient = process.env.S3_PUBLIC_URL
+  ? new S3Client({
+      endpoint: process.env.S3_PUBLIC_URL,
+      region: "us-east-1",
+      credentials: {
+        accessKeyId: process.env.S3_ACCESS_KEY || "minioadmin",
+        secretAccessKey: process.env.S3_SECRET_KEY || "minioadmin",
+      },
+      forcePathStyle: true,
+    })
+  : s3Client;
 
 export async function getPresignedUploadUrl(
   bucket: string,
@@ -26,15 +41,7 @@ export async function getPresignedUploadUrl(
     Key: key,
     ContentType: contentType,
   });
-  const url = await getSignedUrl(s3Client, command, { expiresIn });
-
-  // Rewrite internal MinIO URL to public URL for browser access
-  const publicUrl = process.env.S3_PUBLIC_URL;
-  const internalEndpoint = process.env.S3_ENDPOINT || "http://localhost:9000";
-  if (publicUrl && url.startsWith(internalEndpoint)) {
-    return url.replace(internalEndpoint, publicUrl);
-  }
-  return url;
+  return getSignedUrl(s3PublicClient, command, { expiresIn });
 }
 
 export async function getPresignedDownloadUrl(
@@ -46,7 +53,7 @@ export async function getPresignedDownloadUrl(
     Bucket: bucket,
     Key: key,
   });
-  return getSignedUrl(s3Client, command, { expiresIn });
+  return getSignedUrl(s3PublicClient, command, { expiresIn });
 }
 
 export { s3Client };
