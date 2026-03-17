@@ -4,7 +4,7 @@ FROM node:20-alpine AS base
 FROM base AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm install
 
 # Build the application
 FROM base AS builder
@@ -14,6 +14,14 @@ COPY . .
 
 # Generate Prisma client
 RUN npx prisma generate
+
+# Dummy build-time env vars (replaced at runtime)
+ENV STRIPE_SECRET_KEY=sk_dummy_buildtime
+ENV NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_dummy_buildtime
+ENV NEXTAUTH_SECRET=dummy_build_secret
+ENV NEXTAUTH_URL=http://localhost:3000
+ENV GOOGLE_CLIENT_ID=dummy
+ENV GOOGLE_CLIENT_SECRET=dummy
 
 RUN npm run build
 
