@@ -5,26 +5,39 @@ import { authConfig } from "@/lib/auth.config";
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
   ...authConfig,
+  trustHost: true,
   adapter: PrismaAdapter(prisma),
   session: {
-    strategy: "database",
+    strategy: "jwt",
   },
   callbacks: {
-    async session({ session, user }) {
-      if (session.user) {
-        session.user.id = user.id;
-        // Fetch extra user fields
+    async jwt({ token, user }) {
+      if (user) {
+        token.id = user.id;
+      }
+      // Refresh user data from DB on each token refresh
+      if (token.id) {
         const dbUser = await prisma.user.findUnique({
-          where: { id: user.id },
+          where: { id: token.id as string },
           select: { role: true, credits: true, locale: true, theme: true },
         });
         if (dbUser) {
-          const u = session.user as unknown as Record<string, unknown>;
-          u.role = dbUser.role;
-          u.credits = dbUser.credits;
-          u.locale = dbUser.locale;
-          u.theme = dbUser.theme;
+          token.role = dbUser.role;
+          token.credits = dbUser.credits;
+          token.locale = dbUser.locale;
+          token.theme = dbUser.theme;
         }
+      }
+      return token;
+    },
+    async session({ session, token }) {
+      if (session.user && token) {
+        const u = session.user as unknown as Record<string, unknown>;
+        u.id = token.id;
+        u.role = token.role;
+        u.credits = token.credits;
+        u.locale = token.locale;
+        u.theme = token.theme;
       }
       return session;
     },
