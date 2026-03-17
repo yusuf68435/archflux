@@ -78,10 +78,10 @@ def build_dxf(elements: list[VectorElement], image_width: int, image_height: int
     # Add border frame
     _add_border(msp, image_width, image_height)
 
-    # Save to bytes
-    stream = io.BytesIO()
+    # Save to bytes (ezdxf.write uses text stream, encode to bytes)
+    stream = io.StringIO()
     doc.write(stream)
-    return stream.getvalue()
+    return stream.getvalue().encode("utf-8")
 
 
 def _add_rectangle(msp, element: VectorElement, layer: str, transform):
