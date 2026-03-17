@@ -26,7 +26,15 @@ export async function getPresignedUploadUrl(
     Key: key,
     ContentType: contentType,
   });
-  return getSignedUrl(s3Client, command, { expiresIn });
+  const url = await getSignedUrl(s3Client, command, { expiresIn });
+
+  // Rewrite internal MinIO URL to public URL for browser access
+  const publicUrl = process.env.S3_PUBLIC_URL;
+  const internalEndpoint = process.env.S3_ENDPOINT || "http://localhost:9000";
+  if (publicUrl && url.startsWith(internalEndpoint)) {
+    return url.replace(internalEndpoint, publicUrl);
+  }
+  return url;
 }
 
 export async function getPresignedDownloadUrl(
