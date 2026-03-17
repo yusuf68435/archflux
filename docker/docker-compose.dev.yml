@@ -1,0 +1,30 @@
+# Development overrides - run with:
+# docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  # Only run infrastructure services in dev
+  # Frontend and backend run on host for hot reload
+  frontend:
+    profiles: ["full"]
+
+  backend:
+    profiles: ["full"]
+
+  celery-worker:
+    profiles: ["full"]
+
+  nginx:
+    profiles: ["full"]
+
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  minio:
+    ports:
+      - "9000:9000"
+      - "9001:9001"
