@@ -160,9 +160,9 @@ def add_dimensions_to_dxf(
         # Height dimension to the right
         _add_linear_dimension_vertical(msp, (x_max, y_min), (x_max, y_max), x_max + 30, f"{height:.0f}")
 
-    stream = io.BytesIO()
+    stream = io.StringIO()
     doc.write(stream)
-    return stream.getvalue()
+    return stream.getvalue().encode("utf-8")
 
 
 def _add_linear_dimension(msp, p1, p2, text_y, text):
@@ -254,9 +254,9 @@ def add_coding_to_dxf(
             dxfattribs={"layer": "TEXT", "insert": (x, y)},
         ).set_placement((x, y), align=TextEntityAlignment.MIDDLE_CENTER)
 
-    stream = io.BytesIO()
+    stream = io.StringIO()
     doc.write(stream)
-    return stream.getvalue()
+    return stream.getvalue().encode("utf-8")
 
 
 def generate_preview(dxf_bytes: bytes) -> bytes:

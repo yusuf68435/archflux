@@ -14,7 +14,7 @@ from app.pipeline.detector import facade_detector
 from app.pipeline.dxf_builder import add_dimensions_to_dxf, build_dxf, generate_preview
 from app.pipeline.manual_coder import apply_manual_coding
 from app.pipeline.preprocessor import (
-    crop_region,
+    crop_region as crop_region_fn,
     image_to_bytes,
     load_image_from_bytes,
     preprocess_image,
@@ -45,7 +45,7 @@ def run_full_pipeline(
     image = load_image_from_bytes(image_data)
 
     if crop_region:
-        image = crop_region(image, crop_region)
+        image = crop_region_fn(image, crop_region)
 
     report(5, "preprocessing")
     image = preprocess_image(image)
@@ -184,7 +184,7 @@ def run_detail_pipeline(
     image = load_image_from_bytes(image_data)
 
     report(10, "cropping_detail")
-    detail = crop_region(image, detail_region)
+    detail = crop_region_fn(image, detail_region)
     # Don't resize down for detail - keep high resolution
     detail = preprocess_image(detail, max_size=settings.MAX_IMAGE_SIZE)
     h, w = detail.shape[:2]
