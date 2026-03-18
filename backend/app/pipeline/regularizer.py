@@ -39,7 +39,7 @@ def regularize_traces(
 
 def _merge_horizontal_lines(lines: list[TracedLine]) -> list[TracedLine]:
     """Merge floor-slab lines that share nearly the same Y position."""
-    h_layers = {"structure", "FLOOR-SLABS", "detail"}
+    h_layers = {"structure", "FLOOR-SLABS"}
     h_lines = [l for l in lines if _is_horizontal(l) and l.layer in h_layers]
     others   = [l for l in lines if not (_is_horizontal(l) and l.layer in h_layers)]
 
@@ -163,7 +163,7 @@ def _snap_windows_to_grid(
 
     result: list[TracedContour] = []
     for c in contours:
-        if c.layer not in {"detail", "WINDOWS", "BALCONIES"}:
+        if c.layer not in {"WINDOWS", "BALCONIES"}:
             result.append(c)
             continue
 

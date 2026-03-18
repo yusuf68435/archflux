@@ -88,47 +88,68 @@ class FacadeDetector:
             "window_rects": window_rects,
         }
 
-        # ── Pixel-level edge tracing (Canny → contours → DXF polylines) ─────
+        # ── Pixel-level edge tracing (multi-scale Canny → contours → DXF) ────
         lines: list[TracedLine] = []
         contours: list[TracedContour] = []
 
-        # Work at full resolution for detail quality
+        # Work at full resolution for maximum detail
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
 
-        # Reduce noise while preserving edges
-        smooth = cv2.bilateralFilter(gray, d=7, sigmaColor=50, sigmaSpace=50)
+        # ── Multi-scale edge detection for both fine & coarse detail ─────
+        # Scale 1: Fine detail — light bilateral, low Canny thresholds
+        fine = cv2.bilateralFilter(gray, d=5, sigmaColor=30, sigmaSpace=30)
+        med = float(np.median(fine))
+        edges_fine = cv2.Canny(fine, max(5, int(med * 0.25)), min(200, int(med * 0.8)),
+                               apertureSize=3, L2gradient=True)
 
-        # Adaptive Canny: thresholds derived from image median
-        med = float(np.median(smooth))
-        lo = max(10, int(med * 0.4))
-        hi = min(250, int(med * 1.2))
-        edges = cv2.Canny(smooth, lo, hi, apertureSize=3, L2gradient=True)
+        # Scale 2: Coarse structure — stronger smoothing, higher thresholds
+        coarse = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
+        edges_coarse = cv2.Canny(coarse, max(15, int(med * 0.5)), min(250, int(med * 1.5)),
+                                  apertureSize=3, L2gradient=True)
 
-        # Dilate slightly to connect broken edges
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        edges = cv2.dilate(edges, kernel, iterations=1)
-        edges = cv2.erode(edges, kernel, iterations=1)
+        # Combine both edge maps
+        edges = cv2.bitwise_or(edges_fine, edges_coarse)
 
-        # Extract all contours
-        raw_contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_TC89_L1)
+        # ── Morphological closing to bridge small gaps ───────────────────
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_kernel, iterations=1)
 
-        for cnt in raw_contours:
-            if len(cnt) < 3:
+        # Thin back to single-pixel edges
+        thin_kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+        edges = cv2.erode(cv2.dilate(edges, thin_kernel, iterations=1),
+                          thin_kernel, iterations=1)
+
+        # ── Contour extraction with hierarchy ────────────────────────────
+        raw_contours, hierarchy = cv2.findContours(
+            edges, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1
+        )
+
+        min_arc = 15.0  # minimum arc length to keep (filters tiny dots)
+
+        for i, cnt in enumerate(raw_contours):
+            if len(cnt) < 2:
                 continue
+
+            arc = cv2.arcLength(cnt, True)
+            if arc < min_arc:
+                continue
+
             area = cv2.contourArea(cnt)
-            if area < 20:  # skip tiny noise contours
-                continue
 
-            # Simplify: epsilon controls smoothness vs detail trade-off
-            epsilon = max(1.0, 0.003 * cv2.arcLength(cnt, True))
+            # Adaptive simplification: less epsilon = more detail kept
+            epsilon = max(0.5, 0.002 * arc)
             approx = cv2.approxPolyDP(cnt, epsilon, False)
 
             pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
             if len(pts) < 2:
                 continue
 
-            closed = len(pts) >= 4 and area > 200
-            contours.append(TracedContour(points=pts, layer="detail", closed=closed))
+            # Determine if contour is closed (area-based + hierarchy check)
+            is_closed = len(pts) >= 4 and area > 100
+            if hierarchy is not None and hierarchy[0][i][2] >= 0:
+                is_closed = True  # has children → likely a closed shape
+
+            contours.append(TracedContour(points=pts, layer="detail", closed=is_closed))
 
         return lines, contours, detect_meta
 
