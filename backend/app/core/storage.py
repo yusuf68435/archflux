@@ -50,8 +50,22 @@ def generate_presigned_url(bucket: str, key: str, expires_in: int = 3600) -> str
 
 
 def ensure_buckets_exist():
+    import json
+
     client = get_s3_client()
     existing = {b["Name"] for b in client.list_buckets().get("Buckets", [])}
     for bucket in [settings.S3_BUCKET_UPLOADS, settings.S3_BUCKET_RESULTS]:
         if bucket not in existing:
             client.create_bucket(Bucket=bucket)
+        # Set public read policy so files are accessible via nginx proxy
+        policy = json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Sid": "PublicRead",
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["s3:GetObject"],
+                "Resource": [f"arn:aws:s3:::{bucket}/*"],
+            }],
+        })
+        client.put_bucket_policy(Bucket=bucket, Policy=policy)
