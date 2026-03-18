@@ -34,6 +34,8 @@ services:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: ${NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-ArchFlux <noreply@archflux.app>}
       NEXT_PUBLIC_SENTRY_DSN: ${SENTRY_DSN:-}
       AUTH_TRUST_HOST: "true"
     restart: always
@@ -64,6 +66,13 @@ services:
       SENTRY_DSN: ${SENTRY_DSN:-}
       DEVICE: ${DEVICE:-cuda}
     restart: always
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   nginx:
     restart: always

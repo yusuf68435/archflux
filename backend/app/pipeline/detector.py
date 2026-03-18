@@ -88,68 +88,101 @@ class FacadeDetector:
             "window_rects": window_rects,
         }
 
-        # ── Pixel-level edge tracing (multi-scale Canny → contours → DXF) ────
+        # ── Pixel-level edge tracing ─────────────────────────────────────────
         lines: list[TracedLine] = []
         contours: list[TracedContour] = []
 
-        # Work at full resolution for maximum detail
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
 
-        # ── Multi-scale edge detection for both fine & coarse detail ─────
-        # Scale 1: Fine detail — light bilateral, low Canny thresholds
-        fine = cv2.bilateralFilter(gray, d=5, sigmaColor=30, sigmaSpace=30)
-        med = float(np.median(fine))
-        edges_fine = cv2.Canny(fine, max(5, int(med * 0.25)), min(200, int(med * 0.8)),
+        # ── CLAHE contrast enhancement ───────────────────────────────────
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        med = float(np.median(enhanced))
+
+        # ── Scale 1: Very fine — minimal smoothing, very low thresholds ──
+        very_fine = cv2.GaussianBlur(enhanced, (3, 3), 0.8)
+        edges_vfine = cv2.Canny(very_fine,
+                                max(3, int(med * 0.15)),
+                                min(150, int(med * 0.55)),
+                                apertureSize=3, L2gradient=True)
+
+        # ── Scale 2: Fine — light bilateral ──────────────────────────────
+        fine = cv2.bilateralFilter(enhanced, d=5, sigmaColor=30, sigmaSpace=30)
+        edges_fine = cv2.Canny(fine,
+                               max(5, int(med * 0.25)),
+                               min(200, int(med * 0.8)),
                                apertureSize=3, L2gradient=True)
 
-        # Scale 2: Coarse structure — stronger smoothing, higher thresholds
-        coarse = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
-        edges_coarse = cv2.Canny(coarse, max(15, int(med * 0.5)), min(250, int(med * 1.5)),
+        # ── Scale 3: Coarse — strong smoothing for major edges ───────────
+        coarse = cv2.bilateralFilter(enhanced, d=9, sigmaColor=75, sigmaSpace=75)
+        edges_coarse = cv2.Canny(coarse,
+                                  max(15, int(med * 0.5)),
+                                  min(250, int(med * 1.5)),
                                   apertureSize=3, L2gradient=True)
 
-        # Combine both edge maps
-        edges = cv2.bitwise_or(edges_fine, edges_coarse)
+        # ── Scale 4: Adaptive threshold for shadow/texture edges ─────────
+        block = max(31, min(int(min(h, w) * 0.04) | 1, 201))  # odd number
+        adapt = cv2.adaptiveThreshold(enhanced, 255,
+                                       cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV,
+                                       blockSize=block, C=4)
+        # Extract edges from adaptive threshold via Canny on the thresholded image
+        edges_adapt = cv2.Canny(adapt, 50, 150)
 
-        # ── Morphological closing to bridge small gaps ───────────────────
-        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+        # ── Combine all edge maps ────────────────────────────────────────
+        edges = cv2.bitwise_or(edges_vfine, edges_fine)
+        edges = cv2.bitwise_or(edges, edges_coarse)
+        edges = cv2.bitwise_or(edges, edges_adapt)
 
-        # Thin back to single-pixel edges
-        thin_kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-        edges = cv2.erode(cv2.dilate(edges, thin_kernel, iterations=1),
-                          thin_kernel, iterations=1)
+        # ── Morphological: close small gaps, then thin to 1px ────────────
+        close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_k, iterations=1)
 
-        # ── Contour extraction with hierarchy ────────────────────────────
+        # ── Contour extraction ───────────────────────────────────────────
         raw_contours, hierarchy = cv2.findContours(
             edges, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1
         )
 
-        min_arc = 15.0  # minimum arc length to keep (filters tiny dots)
+        min_arc = 8.0  # lowered for finer detail capture
 
         for i, cnt in enumerate(raw_contours):
             if len(cnt) < 2:
                 continue
-
             arc = cv2.arcLength(cnt, True)
             if arc < min_arc:
                 continue
 
             area = cv2.contourArea(cnt)
 
-            # Adaptive simplification: less epsilon = more detail kept
-            epsilon = max(0.5, 0.002 * arc)
+            # Very conservative simplification — keep maximum detail
+            epsilon = max(0.3, 0.001 * arc)
             approx = cv2.approxPolyDP(cnt, epsilon, False)
 
             pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
             if len(pts) < 2:
                 continue
 
-            # Determine if contour is closed (area-based + hierarchy check)
-            is_closed = len(pts) >= 4 and area > 100
+            is_closed = len(pts) >= 4 and area > 80
             if hierarchy is not None and hierarchy[0][i][2] >= 0:
-                is_closed = True  # has children → likely a closed shape
+                is_closed = True
 
             contours.append(TracedContour(points=pts, layer="detail", closed=is_closed))
+
+        # ── LSD straight lines → TracedLine objects ──────────────────────
+        lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
+        lsd_lines = lsd.detect(enhanced)[0]
+        if lsd_lines is not None:
+            min_len = max(h, w) * 0.015  # 1.5% of image dimension
+            for seg in lsd_lines:
+                x1, y1, x2, y2 = seg[0]
+                length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+                if length >= min_len:
+                    lines.append(TracedLine(
+                        x1=float(x1), y1=float(y1),
+                        x2=float(x2), y2=float(y2),
+                        width=1.0, layer="detail",
+                    ))
 
         return lines, contours, detect_meta
 

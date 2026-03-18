@@ -82,7 +82,7 @@ def build_dxf_from_traces(lines, contours, image_width: int, image_height: int) 
         # New semantic names from new detector
         "outline":   "BUILDING-OUTLINE",
         "structure": "FLOOR-SLABS",      # horizontal lines
-        "detail":    "WINDOWS",
+        "detail":    "DETAIL",
         "balcony":   "BALCONIES",
         # Allow detector to emit semantic names directly
         "BUILDING-OUTLINE": "BUILDING-OUTLINE",
@@ -91,6 +91,7 @@ def build_dxf_from_traces(lines, contours, image_width: int, image_height: int) 
         "WINDOWS":          "WINDOWS",
         "DOORS":            "DOORS",
         "BALCONIES":        "BALCONIES",
+        "DETAIL":           "DETAIL",
     }
 
     # Add line segments — auto-distinguish floor slabs vs columns by orientation
