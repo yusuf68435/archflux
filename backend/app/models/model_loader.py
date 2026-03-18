@@ -1,20 +1,13 @@
-"""Singleton model loader for AI models.
+"""Model loader — no-op for the classical CV pipeline.
 
-Loads YOLO and SAM models once and keeps them in memory.
+The projection-based detector requires no ML models.
+SAM / YOLO integration is reserved for future versions.
 """
 
 from app.pipeline.detector import facade_detector
-from app.pipeline.segmentor import facade_segmentor
 
 
 def load_all_models():
-    """Load all AI models into memory. Call during application startup."""
-    print("Loading YOLO model...")
+    """Initialize pipeline components. Called during application startup."""
     facade_detector.load()
-    print("YOLO model loaded.")
-
-    print("Loading SAM model...")
-    facade_segmentor.load()
-    print("SAM model loaded.")
-
-    print("All models loaded successfully.")
+    print("Pipeline initialized (classical CV — no model weights required).")

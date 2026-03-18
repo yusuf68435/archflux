@@ -1,13 +1,12 @@
 """Stage 1: Image Preprocessing
 
-- Perspective correction via vanishing point detection
+- Perspective correction via LSD + RANSAC vanishing point
 - Resolution management (8K max)
 - CLAHE contrast enhancement
 """
 
 import cv2
 import numpy as np
-from PIL import Image
 
 from app.config import settings
 
@@ -28,127 +27,243 @@ def resize_to_max(image: np.ndarray, max_size: int) -> np.ndarray:
     h, w = image.shape[:2]
     if max(h, w) <= max_size:
         return image
-
     scale = max_size / max(h, w)
-    new_w = int(w * scale)
-    new_h = int(h * scale)
-    return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
 
 def correct_perspective(image: np.ndarray) -> np.ndarray:
-    """Attempt perspective correction using vanishing point detection.
+    """Perspective correction using LSD + RANSAC vanishing point.
 
-    Uses Hough lines to find dominant vertical and horizontal lines,
-    then applies homography to rectify the facade to a frontal view.
+    Steps:
+    1. LSD detects line segments (more robust than HoughLinesP).
+    2. Classify near-vertical / near-horizontal segments.
+    3. Measure median signed tilt of vertical segments.
+    4. If tilt <= 3 deg -> return original (already rectified).
+    5. RANSAC finds the vertical vanishing point (VP).
+    6. VP very far away (>6x image height) -> simple rotation deskew.
+    7. VP nearby -> keystone warp.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-
-    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=100, minLineLength=100, maxLineGap=10)
-    if lines is None or len(lines) < 4:
-        return image  # Not enough lines to determine perspective
-
-    # Separate lines into vertical and horizontal groups
-    vertical_lines = []
-    horizontal_lines = []
-
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
-        angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
-        if abs(angle) > 70:  # Near vertical
-            vertical_lines.append(line[0])
-        elif abs(angle) < 20:  # Near horizontal
-            horizontal_lines.append(line[0])
-
-    if len(vertical_lines) < 2 or len(horizontal_lines) < 2:
-        return image  # Can't determine perspective with too few lines
-
-    # Check if correction is needed: measure average deviation from true vertical
-    avg_deviation = np.mean([
-        abs(90 - abs(np.degrees(np.arctan2(y2 - y1, x2 - x1))))
-        for x1, y1, x2, y2 in vertical_lines
-    ])
-
-    if avg_deviation < 2.0:  # Already nearly rectified
-        return image
-
-    # Find corner points from extreme line intersections
     h, w = image.shape[:2]
-    src_points = _find_facade_corners(vertical_lines, horizontal_lines, w, h)
-    if src_points is None:
+
+    lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
+    raw = lsd.detect(gray)[0]
+    if raw is None or len(raw) < 8:
         return image
 
-    dst_points = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
-    matrix = cv2.getPerspectiveTransform(src_points, dst_points)
-    corrected = cv2.warpPerspective(image, matrix, (w, h))
-    return corrected
+    min_len = max(h, w) * 0.04
+    v_segs = []  # near-vertical  (angle_from_vert <= 30 deg)
+    h_segs = []  # near-horizontal (angle_from_vert >= 60 deg)
+
+    for seg in raw:
+        x1, y1, x2, y2 = seg[0]
+        dx, dy = float(x2 - x1), float(y2 - y1)
+        length = np.hypot(dx, dy)
+        if length < min_len:
+            continue
+        # afv: 0 = perfectly vertical, 90 = horizontal
+        afv = abs(np.degrees(np.arctan2(abs(dx), abs(dy))))
+        if afv < 30:
+            v_segs.append((x1, y1, x2, y2, length, afv))
+        elif afv > 60:
+            h_segs.append((x1, y1, x2, y2, length))
+
+    if len(v_segs) < 4:
+        return image
+
+    # Measure median signed tilt (positive = leaning right)
+    signed_tilts = []
+    for x1, y1, x2, y2, _, _ in v_segs:
+        if y1 > y2:
+            x1, y1, x2, y2 = x2, y2, x1, y1  # ensure top-first
+        signed_tilts.append(np.degrees(np.arctan2(x2 - x1, y2 - y1)))
+
+    median_tilt = float(np.median(signed_tilts))
+    if abs(median_tilt) < 3.0:
+        return image  # Already well-rectified
+
+    # RANSAC vanishing point
+    vp = _ransac_vp(v_segs, w, h)
+    if vp is None:
+        return _deskew(image, median_tilt)
+
+    vpx, vpy = vp
+    # If VP is very far -> nearly parallel lines -> just deskew
+    if abs(vpy) > h * 6 or abs(vpy - h) > h * 6:
+        return _deskew(image, median_tilt)
+
+    return _keystone_correct(image, vp, v_segs, w, h)
 
 
-def _find_facade_corners(
-    vertical_lines: list, horizontal_lines: list, width: int, height: int
-) -> np.ndarray | None:
-    """Find the four corners of the facade from detected lines."""
-    # Use the leftmost, rightmost verticals and topmost, bottommost horizontals
-    v_sorted = sorted(vertical_lines, key=lambda l: (l[0] + l[2]) / 2)
-    h_sorted = sorted(horizontal_lines, key=lambda l: (l[1] + l[3]) / 2)
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-    if len(v_sorted) < 2 or len(h_sorted) < 2:
+def _ransac_vp(
+    v_segs: list,
+    w: int,
+    h: int,
+    iterations: int = 300,
+    inlier_thr: float = 2.5,
+) -> tuple | None:
+    """Find vertical vanishing point via RANSAC.
+
+    Represents each segment as a homogeneous line l = p1 x p2,
+    then finds the point that maximises the number of inlier segments
+    (angular distance from segment direction to VP direction < inlier_thr).
+    Refines the result as a length-weighted mean of inlier intersections.
+    """
+    lines = []
+    for x1, y1, x2, y2, length, _ in v_segs:
+        p1 = np.array([x1, y1, 1.0])
+        p2 = np.array([x2, y2, 1.0])
+        lines.append((np.cross(p1, p2), length))
+
+    n = len(lines)
+    if n < 2:
         return None
 
-    left_line = v_sorted[0]
-    right_line = v_sorted[-1]
-    top_line = h_sorted[0]
-    bottom_line = h_sorted[-1]
+    rng = np.random.default_rng(42)
+    best_count = 0
+    best_vp: np.ndarray | None = None
 
-    corners = []
-    for v_line in [left_line, right_line]:
-        for h_line in [top_line, bottom_line]:
-            pt = _line_intersection(v_line, h_line)
-            if pt is not None:
-                corners.append(pt)
+    for _ in range(iterations):
+        i, j = rng.choice(n, 2, replace=False)
+        l1, _ = lines[i]
+        l2, _ = lines[j]
+        vp_h = np.cross(l1, l2)
+        if abs(vp_h[2]) < 1e-9:
+            continue
+        vp_c = vp_h[:2] / vp_h[2]
 
-    if len(corners) != 4:
+        count = sum(
+            1 for k in range(n)
+            if _angle_to_vp(*v_segs[k][:4], vp_c) < inlier_thr
+        )
+        if count > best_count:
+            best_count = count
+            best_vp = vp_c
+
+    if best_vp is None or best_count < max(4, int(n * 0.4)):
         return None
 
-    # Order: top-left, top-right, bottom-right, bottom-left
-    corners.sort(key=lambda p: (p[1], p[0]))
-    top = sorted(corners[:2], key=lambda p: p[0])
-    bottom = sorted(corners[2:], key=lambda p: p[0])
-    ordered = np.float32([top[0], top[1], bottom[1], bottom[0]])
+    # Refine: weighted mean over inlier pair intersections
+    inlier_lines = [
+        (lines[k][0], lines[k][1])
+        for k in range(n)
+        if _angle_to_vp(*v_segs[k][:4], best_vp) < inlier_thr
+    ]
 
-    # Sanity check: corners should be within reasonable bounds
-    for pt in ordered:
-        if pt[0] < -width * 0.1 or pt[0] > width * 1.1:
+    sum_vp = np.zeros(2)
+    sum_w = 0.0
+    for ki in range(len(inlier_lines)):
+        for mi in range(ki + 1, len(inlier_lines)):
+            l1, w1 = inlier_lines[ki]
+            l2, w2 = inlier_lines[mi]
+            vp_h = np.cross(l1, l2)
+            if abs(vp_h[2]) < 1e-9:
+                continue
+            weight = w1 * w2
+            sum_vp += (vp_h[:2] / vp_h[2]) * weight
+            sum_w += weight
+
+    if sum_w < 1e-9:
+        return float(best_vp[0]), float(best_vp[1])
+
+    refined = sum_vp / sum_w
+    return float(refined[0]), float(refined[1])
+
+
+def _angle_to_vp(
+    x1: float, y1: float, x2: float, y2: float, vp: np.ndarray
+) -> float:
+    """Angle (degrees) between segment direction and direction toward VP."""
+    mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    seg_dir = np.array([x2 - x1, y2 - y1], dtype=float)
+    vp_dir = np.array([vp[0] - mx, vp[1] - my], dtype=float)
+    sn = np.linalg.norm(seg_dir)
+    vn = np.linalg.norm(vp_dir)
+    if sn < 1e-9 or vn < 1e-9:
+        return 90.0
+    cos_a = min(1.0, abs(np.dot(seg_dir / sn, vp_dir / vn)))
+    return float(np.degrees(np.arccos(cos_a)))
+
+
+def _deskew(image: np.ndarray, angle_deg: float) -> np.ndarray:
+    """Rotate image by -angle_deg to remove tilt. Clamps to +-8 deg."""
+    angle_deg = max(-8.0, min(8.0, angle_deg))
+    h, w = image.shape[:2]
+    M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), -angle_deg, 1.0)
+    return cv2.warpAffine(
+        image, M, (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+
+
+def _keystone_correct(
+    image: np.ndarray,
+    vp: tuple,
+    v_segs: list,
+    w: int,
+    h: int,
+) -> np.ndarray:
+    """Correct converging verticals using the estimated vertical VP.
+
+    Finds the trapezoidal region spanned by near-vertical segments and
+    maps it to a rectangle. Displacement is clamped to 15% of image
+    width to prevent over-correction on unusual images.
+    """
+    vpx, vpy = vp
+    if abs(vpy) < 1:
+        return image
+
+    # Horizontal span: 10th-90th percentile of vertical segment midpoints
+    x_coords = sorted([(x1 + x2) / 2.0 for x1, y1, x2, y2, *_ in v_segs])
+    left_x = float(np.percentile(x_coords, 10))
+    right_x = float(np.percentile(x_coords, 90))
+
+    if (right_x - left_x) < w * 0.2:
+        return image
+
+    def x_at_y(px: float, py: float, target_y: float) -> float | None:
+        """X coord where line VP->(px,py) passes through target_y."""
+        dy = py - vpy
+        if abs(dy) < 1e-9:
             return None
-        if pt[1] < -height * 0.1 or pt[1] > height * 1.1:
-            return None
+        t = (target_y - vpy) / dy
+        return vpx + t * (px - vpx)
 
-    return ordered
+    tl_x = x_at_y(left_x, h, 0.0)
+    tr_x = x_at_y(right_x, h, 0.0)
+    if tl_x is None or tr_x is None:
+        return image
 
+    # Clamp: max 15% shift per corner
+    max_shift = w * 0.15
+    tl_x = max(left_x - max_shift, min(left_x + max_shift, tl_x))
+    tr_x = max(right_x - max_shift, min(right_x + max_shift, tr_x))
 
-def _line_intersection(line1: np.ndarray, line2: np.ndarray) -> tuple[float, float] | None:
-    """Find intersection point of two line segments."""
-    x1, y1, x2, y2 = line1
-    x3, y3, x4, y4 = line2
+    # Guard: don't apply inverted keystone
+    if (tr_x - tl_x) > (right_x - left_x) * 1.3:
+        return image
 
-    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-    if abs(denom) < 1e-10:
-        return None
-
-    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
-    px = x1 + t * (x2 - x1)
-    py = y1 + t * (y2 - y1)
-    return (px, py)
+    src = np.float32([[tl_x, 0], [tr_x, 0], [right_x, h], [left_x, h]])
+    dst = np.float32([[left_x, 0], [right_x, 0], [right_x, h], [left_x, h]])
+    M = cv2.getPerspectiveTransform(src, dst)
+    return cv2.warpPerspective(
+        image, M, (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
 
 
 def enhance_contrast(image: np.ndarray) -> np.ndarray:
     """Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)."""
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     l_channel, a_channel, b_channel = cv2.split(lab)
-
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     l_enhanced = clahe.apply(l_channel)
-
     enhanced = cv2.merge([l_enhanced, a_channel, b_channel])
     return cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
 
@@ -156,24 +271,17 @@ def enhance_contrast(image: np.ndarray) -> np.ndarray:
 def crop_region(image: np.ndarray, region: dict[str, float]) -> np.ndarray:
     """Crop image to specified region {x, y, width, height} in relative coordinates (0-1)."""
     h, w = image.shape[:2]
-    x = int(region["x"] * w)
-    y = int(region["y"] * h)
-    cw = int(region["width"] * w)
-    ch = int(region["height"] * h)
-
-    x = max(0, min(x, w - 1))
-    y = max(0, min(y, h - 1))
-    cw = min(cw, w - x)
-    ch = min(ch, h - y)
-
-    return image[y : y + ch, x : x + cw]
+    x = max(0, min(int(region["x"] * w), w - 1))
+    y = max(0, min(int(region["y"] * h), h - 1))
+    cw = min(int(region["width"] * w), w - x)
+    ch = min(int(region["height"] * h), h - y)
+    return image[y:y + ch, x:x + cw]
 
 
 def split_image(image: np.ndarray, direction: str, parts: int) -> list[np.ndarray]:
     """Split image into parts along specified direction."""
     h, w = image.shape[:2]
     splits = []
-
     if direction == "horizontal":
         part_w = w // parts
         for i in range(parts):
@@ -186,7 +294,6 @@ def split_image(image: np.ndarray, direction: str, parts: int) -> list[np.ndarra
             y_start = i * part_h
             y_end = h if i == parts - 1 else (i + 1) * part_h
             splits.append(image[y_start:y_end, :])
-
     return splits
 
 

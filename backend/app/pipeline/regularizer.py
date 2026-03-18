@@ -1,265 +1,211 @@
-"""Stage 5: Geometric Regularization
+"""Stage: Geometric Regularization for Traced Lines and Contours.
 
-Cleans up vectorized output:
-- Snaps angles to 0/90/180/270
-- Aligns elements to grid
-- Enforces symmetry
-- Sharpens corners
+Cleans up pipeline output:
+- Merges duplicate / near-identical structural lines (floor slabs, columns)
+- Snaps floor lines to uniform vertical spacing when variance is low
+- Snaps window/balcony contours to the nearest structural grid position
 """
 
 import numpy as np
 
-from app.pipeline.vectorizer import VectorElement
+from app.pipeline.detector import TracedContour, TracedLine
 
-ANGLE_TOLERANCE_DEG = 2.0
-ALIGNMENT_TOLERANCE_PX = 5.0
+# Lines within this many pixels of each other → merge into one
+MERGE_H_PX: float = 10.0
+MERGE_V_PX: float = 10.0
 
+# Windows are snapped to grid positions within this distance
+SNAP_PX: float = 18.0
 
-def regularize_elements(elements: list[VectorElement], image_shape: tuple) -> list[VectorElement]:
-    """Run full regularization pipeline."""
-    elements = [snap_angles(e) for e in elements]
-    elements = align_elements(elements)
-    elements = enforce_grid_pattern(elements, image_shape)
-    elements = sharpen_corners(elements)
-    return elements
+# If floor-spacing std / median < this → regularize to uniform grid
+REGULARITY_THRESHOLD: float = 0.22
 
 
-def snap_angles(element: VectorElement) -> VectorElement:
-    """Snap near-axis angles to exact 0/90/180/270 degrees."""
-    if element.element_type == "line":
-        return _snap_line(element)
-    elif element.element_type == "rectangle":
-        return _snap_rectangle(element)
-    elif element.element_type == "polyline":
-        return _snap_polyline(element)
-    return element
+def regularize_traces(
+    lines: list[TracedLine],
+    contours: list[TracedContour],
+    image_width: int,
+    image_height: int,
+) -> tuple[list[TracedLine], list[TracedContour]]:
+    """Full regularization pipeline.  Returns (lines, contours)."""
+    lines = _merge_horizontal_lines(lines)
+    lines = _merge_vertical_lines(lines)
+    lines = _regularize_floor_spacing(lines)
+    contours = _snap_windows_to_grid(lines, contours)
+    return lines, contours
 
 
-def _snap_line(element: VectorElement) -> VectorElement:
-    """Snap a line to horizontal or vertical if within tolerance."""
-    (x1, y1), (x2, y2) = element.points[0], element.points[1]
-    angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+# ─── Horizontal line merging ─────────────────────────────────────────────────
 
-    if abs(angle) < ANGLE_TOLERANCE_DEG or abs(abs(angle) - 180) < ANGLE_TOLERANCE_DEG:
-        # Snap to horizontal
-        avg_y = (y1 + y2) / 2
-        new_points = [(x1, avg_y), (x2, avg_y)]
-    elif abs(abs(angle) - 90) < ANGLE_TOLERANCE_DEG:
-        # Snap to vertical
-        avg_x = (x1 + x2) / 2
-        new_points = [(avg_x, y1), (avg_x, y2)]
-    else:
-        new_points = element.points
+def _merge_horizontal_lines(lines: list[TracedLine]) -> list[TracedLine]:
+    """Merge floor-slab lines that share nearly the same Y position."""
+    h_layers = {"structure", "FLOOR-SLABS", "detail"}
+    h_lines = [l for l in lines if _is_horizontal(l) and l.layer in h_layers]
+    others   = [l for l in lines if not (_is_horizontal(l) and l.layer in h_layers)]
 
-    return VectorElement(
-        class_name=element.class_name,
-        element_type=element.element_type,
-        points=new_points,
-        bbox=element.bbox,
-        confidence=element.confidence,
-    )
+    if not h_lines:
+        return lines
 
+    h_lines.sort(key=lambda l: _mid_y(l))
+    merged: list[TracedLine] = []
+    used: set[int] = set()
 
-def _snap_rectangle(element: VectorElement) -> VectorElement:
-    """Snap rectangle corners to axis-aligned."""
-    if len(element.points) != 4:
-        return element
+    for i, a in enumerate(h_lines):
+        if i in used:
+            continue
+        ay = _mid_y(a)
+        group = [a]
+        for j, b in enumerate(h_lines):
+            if j <= i or j in used:
+                continue
+            if abs(_mid_y(b) - ay) < MERGE_H_PX:
+                group.append(b)
+                used.add(j)
 
-    pts = np.array(element.points)
+        avg_y = float(np.mean([_mid_y(l) for l in group]))
+        min_x = min(min(l.x1, l.x2) for l in group)
+        max_x = max(max(l.x1, l.x2) for l in group)
+        merged.append(TracedLine(x1=min_x, y1=avg_y, x2=max_x, y2=avg_y,
+                                  width=group[0].width, layer=group[0].layer))
 
-    # Find min bounding box aligned to axes
-    x_min, y_min = pts.min(axis=0)
-    x_max, y_max = pts.max(axis=0)
-
-    # Check if already roughly axis-aligned
-    widths = [abs(pts[i][0] - pts[(i + 1) % 4][0]) for i in range(4)]
-    heights = [abs(pts[i][1] - pts[(i + 1) % 4][1]) for i in range(4)]
-
-    new_points = [
-        (x_min, y_min),  # top-left
-        (x_max, y_min),  # top-right
-        (x_max, y_max),  # bottom-right
-        (x_min, y_max),  # bottom-left
-    ]
-
-    return VectorElement(
-        class_name=element.class_name,
-        element_type=element.element_type,
-        points=new_points,
-        bbox=(x_min, y_min, x_max, y_max),
-        confidence=element.confidence,
-    )
+    return others + merged
 
 
-def _snap_polyline(element: VectorElement) -> VectorElement:
-    """Snap polyline segments to axis-aligned where close."""
-    new_points = [element.points[0]]
+# ─── Vertical line merging ────────────────────────────────────────────────────
 
-    for i in range(1, len(element.points)):
-        x1, y1 = new_points[-1]
-        x2, y2 = element.points[i]
+def _merge_vertical_lines(lines: list[TracedLine]) -> list[TracedLine]:
+    """Merge column lines that share nearly the same X position."""
+    v_layers = {"structure", "COLUMNS"}
+    v_lines = [l for l in lines if _is_vertical(l) and l.layer in v_layers]
+    others   = [l for l in lines if not (_is_vertical(l) and l.layer in v_layers)]
 
-        angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+    if not v_lines:
+        return lines
 
-        if abs(angle) < ANGLE_TOLERANCE_DEG or abs(abs(angle) - 180) < ANGLE_TOLERANCE_DEG:
-            new_points.append((x2, y1))  # Snap to horizontal
-        elif abs(abs(angle) - 90) < ANGLE_TOLERANCE_DEG:
-            new_points.append((x1, y2))  # Snap to vertical
-        else:
-            new_points.append((x2, y2))
+    v_lines.sort(key=lambda l: _mid_x(l))
+    merged: list[TracedLine] = []
+    used: set[int] = set()
 
-    return VectorElement(
-        class_name=element.class_name,
-        element_type=element.element_type,
-        points=new_points,
-        bbox=element.bbox,
-        confidence=element.confidence,
-    )
+    for i, a in enumerate(v_lines):
+        if i in used:
+            continue
+        ax = _mid_x(a)
+        group = [a]
+        for j, b in enumerate(v_lines):
+            if j <= i or j in used:
+                continue
+            if abs(_mid_x(b) - ax) < MERGE_V_PX:
+                group.append(b)
+                used.add(j)
+
+        avg_x = float(np.mean([_mid_x(l) for l in group]))
+        min_y = min(min(l.y1, l.y2) for l in group)
+        max_y = max(max(l.y1, l.y2) for l in group)
+        merged.append(TracedLine(x1=avg_x, y1=min_y, x2=avg_x, y2=max_y,
+                                  width=group[0].width, layer=group[0].layer))
+
+    return others + merged
 
 
-def align_elements(elements: list[VectorElement]) -> list[VectorElement]:
-    """Align elements that are nearly at the same position."""
-    # Group by class for alignment
-    by_class: dict[str, list[int]] = {}
-    for i, e in enumerate(elements):
-        by_class.setdefault(e.class_name, []).append(i)
+# ─── Floor-spacing regularization ────────────────────────────────────────────
 
-    for class_name, indices in by_class.items():
-        if len(indices) < 2:
+def _regularize_floor_spacing(lines: list[TracedLine]) -> list[TracedLine]:
+    """Snap floor lines to a uniform vertical grid when spacing is regular."""
+    h_layers = {"structure", "FLOOR-SLABS"}
+    floor_lines = [l for l in lines if _is_horizontal(l) and l.layer in h_layers]
+    others       = [l for l in lines if not (_is_horizontal(l) and l.layer in h_layers)]
+
+    if len(floor_lines) < 3:
+        return lines
+
+    ys = sorted([_mid_y(l) for l in floor_lines])
+    spacings = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+    if not spacings:
+        return lines
+
+    median_sp = float(np.median(spacings))
+    std_sp    = float(np.std(spacings))
+
+    if median_sp <= 0 or std_sp / median_sp >= REGULARITY_THRESHOLD:
+        return lines  # Too irregular — leave as-is
+
+    # Snap all floors to the regular grid
+    base_y = ys[0]
+    regularized: list[TracedLine] = []
+    for i, fl in enumerate(sorted(floor_lines, key=_mid_y)):
+        ry = base_y + i * median_sp
+        regularized.append(TracedLine(
+            x1=fl.x1, y1=ry, x2=fl.x2, y2=ry,
+            width=fl.width, layer=fl.layer,
+        ))
+
+    return others + regularized
+
+
+# ─── Window snap to grid ──────────────────────────────────────────────────────
+
+def _snap_windows_to_grid(
+    lines: list[TracedLine],
+    contours: list[TracedContour],
+) -> list[TracedContour]:
+    """Snap window/balcony contour corners to the nearest structural grid position."""
+    floor_ys = sorted({
+        _mid_y(l) for l in lines
+        if _is_horizontal(l) and l.layer in {"structure", "FLOOR-SLABS"}
+    })
+    col_xs = sorted({
+        _mid_x(l) for l in lines
+        if _is_vertical(l) and l.layer in {"structure", "COLUMNS"}
+    })
+
+    if not floor_ys or not col_xs:
+        return contours
+
+    result: list[TracedContour] = []
+    for c in contours:
+        if c.layer not in {"detail", "WINDOWS", "BALCONIES"}:
+            result.append(c)
             continue
 
-        # Align tops of same-class elements in same row
-        _align_row_tops(elements, indices)
-        # Align lefts of same-class elements in same column
-        _align_column_lefts(elements, indices)
+        pts = c.points
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x1, x2 = min(xs), max(xs)
+        y1, y2 = min(ys), max(ys)
 
-    return elements
+        sx1 = _nearest(x1, col_xs, SNAP_PX) or x1
+        sx2 = _nearest(x2, col_xs, SNAP_PX) or x2
+        sy1 = _nearest(y1, floor_ys, SNAP_PX * 2) or y1
+        sy2 = _nearest(y2, floor_ys, SNAP_PX * 2) or y2
 
-
-def _align_row_tops(elements: list[VectorElement], indices: list[int]):
-    """Align top edges of elements in the same approximate row."""
-    tops = [(i, min(p[1] for p in elements[i].points)) for i in indices]
-    tops.sort(key=lambda t: t[1])
-
-    groups = []
-    current_group = [tops[0]]
-
-    for j in range(1, len(tops)):
-        if abs(tops[j][1] - current_group[-1][1]) < ALIGNMENT_TOLERANCE_PX:
-            current_group.append(tops[j])
+        if sx2 > sx1 and sy2 > sy1:
+            result.append(TracedContour(
+                points=[(sx1, sy1), (sx2, sy1), (sx2, sy2), (sx1, sy2)],
+                layer=c.layer,
+                closed=c.closed,
+            ))
         else:
-            groups.append(current_group)
-            current_group = [tops[j]]
-    groups.append(current_group)
+            result.append(c)
 
-    for group in groups:
-        if len(group) < 2:
-            continue
-        avg_top = np.mean([t[1] for t in group])
-        for idx, _ in group:
-            _shift_element_y(elements, idx, avg_top)
-
-
-def _align_column_lefts(elements: list[VectorElement], indices: list[int]):
-    """Align left edges of elements in the same approximate column."""
-    lefts = [(i, min(p[0] for p in elements[i].points)) for i in indices]
-    lefts.sort(key=lambda t: t[1])
-
-    groups = []
-    current_group = [lefts[0]]
-
-    for j in range(1, len(lefts)):
-        if abs(lefts[j][1] - current_group[-1][1]) < ALIGNMENT_TOLERANCE_PX:
-            current_group.append(lefts[j])
-        else:
-            groups.append(current_group)
-            current_group = [lefts[j]]
-    groups.append(current_group)
-
-    for group in groups:
-        if len(group) < 2:
-            continue
-        avg_left = np.mean([t[1] for t in group])
-        for idx, _ in group:
-            _shift_element_x(elements, idx, avg_left)
-
-
-def _shift_element_y(elements: list[VectorElement], idx: int, target_top: float):
-    """Shift element vertically so its top aligns with target."""
-    e = elements[idx]
-    current_top = min(p[1] for p in e.points)
-    dy = target_top - current_top
-    new_points = [(p[0], p[1] + dy) for p in e.points]
-    elements[idx] = VectorElement(
-        class_name=e.class_name,
-        element_type=e.element_type,
-        points=new_points,
-        bbox=e.bbox,
-        confidence=e.confidence,
-    )
-
-
-def _shift_element_x(elements: list[VectorElement], idx: int, target_left: float):
-    """Shift element horizontally so its left aligns with target."""
-    e = elements[idx]
-    current_left = min(p[0] for p in e.points)
-    dx = target_left - current_left
-    new_points = [(p[0] + dx, p[1]) for p in e.points]
-    elements[idx] = VectorElement(
-        class_name=e.class_name,
-        element_type=e.element_type,
-        points=new_points,
-        bbox=e.bbox,
-        confidence=e.confidence,
-    )
-
-
-def enforce_grid_pattern(elements: list[VectorElement], image_shape: tuple) -> list[VectorElement]:
-    """Detect and enforce grid patterns in window arrays."""
-    windows = [e for e in elements if e.class_name == "window"]
-    if len(windows) < 4:
-        return elements
-
-    # Detect regular spacing
-    centers = [((min(p[0] for p in w.points) + max(p[0] for p in w.points)) / 2,
-                (min(p[1] for p in w.points) + max(p[1] for p in w.points)) / 2)
-               for w in windows]
-
-    # Check for regular horizontal spacing
-    x_centers = sorted(set(round(c[0] / 10) * 10 for c in centers))
-    if len(x_centers) >= 3:
-        spacings = [x_centers[i + 1] - x_centers[i] for i in range(len(x_centers) - 1)]
-        if len(spacings) >= 2:
-            avg_spacing = np.mean(spacings)
-            std_spacing = np.std(spacings)
-            if std_spacing < avg_spacing * 0.15:  # Regular enough
-                # Snap to regular grid
-                base_x = x_centers[0]
-                for i, x in enumerate(x_centers):
-                    expected_x = base_x + i * avg_spacing
-                    # Shift windows near this x to expected_x
-                    for j, w in enumerate(windows):
-                        wx = (min(p[0] for p in w.points) + max(p[0] for p in w.points)) / 2
-                        if abs(wx - x * 1.0) < 15:
-                            dx = expected_x - wx
-                            elements[elements.index(w)] = VectorElement(
-                                class_name=w.class_name,
-                                element_type=w.element_type,
-                                points=[(p[0] + dx, p[1]) for p in w.points],
-                                bbox=w.bbox,
-                                confidence=w.confidence,
-                            )
-
-    return elements
-
-
-def sharpen_corners(elements: list[VectorElement]) -> list[VectorElement]:
-    """Ensure rectangular elements have exact 90-degree corners."""
-    result = []
-    for e in elements:
-        if e.element_type == "rectangle" and len(e.points) == 4:
-            # Already snapped to axis-aligned in snap_angles
-            result.append(e)
-        else:
-            result.append(e)
     return result
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def _is_horizontal(l: TracedLine, tol: float = 6.0) -> bool:
+    return abs(l.y1 - l.y2) < tol
+
+def _is_vertical(l: TracedLine, tol: float = 6.0) -> bool:
+    return abs(l.x1 - l.x2) < tol
+
+def _mid_y(l: TracedLine) -> float:
+    return (l.y1 + l.y2) / 2
+
+def _mid_x(l: TracedLine) -> float:
+    return (l.x1 + l.x2) / 2
+
+def _nearest(value: float, candidates: list[float], threshold: float) -> float | None:
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda c: abs(c - value))
+    return best if abs(best - value) <= threshold else None
