@@ -82,15 +82,52 @@ class FacadeDetector:
                 "w": (max(xs) - min(xs)) * scale, "h": (max(ys) - min(ys)) * scale,
             })
 
+        # Scale building bounds back to full-res coords
+        full_top    = top    * scale
+        full_bottom = bottom * scale
+        full_left   = left   * scale
+        full_right  = right  * scale
+
+        full_floor_ys  = [y * scale for y in floor_ys]
+        full_column_xs = [x * scale for x in column_xs]
+
         detect_meta = {
-            "floor_ys": [y * scale for y in floor_ys],
-            "column_xs": [x * scale for x in column_xs],
+            "floor_ys":    full_floor_ys,
+            "column_xs":   full_column_xs,
             "window_rects": window_rects,
         }
 
         # ── Pixel-level edge tracing ─────────────────────────────────────────
         lines: list[TracedLine] = []
         contours: list[TracedContour] = []
+
+        # ── Structural lines from meta → semantic DXF layers ─────────────────
+        # Floor slab horizontal lines
+        for fy in full_floor_ys:
+            lines.append(TracedLine(
+                x1=full_left, y1=fy, x2=full_right, y2=fy,
+                width=2.0, layer="structure",
+            ))
+        # Column/wall vertical lines
+        for cx in full_column_xs:
+            lines.append(TracedLine(
+                x1=cx, y1=full_top, x2=cx, y2=full_bottom,
+                width=2.0, layer="COLUMNS",
+            ))
+        # Building outline rectangle
+        lines.append(TracedLine(x1=full_left,  y1=full_top,    x2=full_right, y2=full_top,    width=3.0, layer="outline"))
+        lines.append(TracedLine(x1=full_right, y1=full_top,    x2=full_right, y2=full_bottom, width=3.0, layer="outline"))
+        lines.append(TracedLine(x1=full_right, y1=full_bottom, x2=full_left,  y2=full_bottom, width=3.0, layer="outline"))
+        lines.append(TracedLine(x1=full_left,  y1=full_bottom, x2=full_left,  y2=full_top,    width=3.0, layer="outline"))
+        # Window rectangles
+        for wr in window_rects:
+            wx1, wy1 = wr["x"], wr["y"]
+            wx2, wy2 = wx1 + wr["w"], wy1 + wr["h"]
+            contours.append(TracedContour(
+                points=[(wx1, wy1), (wx2, wy1), (wx2, wy2), (wx1, wy2)],
+                layer="WINDOWS",
+                closed=True,
+            ))
 
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
 
