@@ -132,47 +132,29 @@ class FacadeDetector:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
 
         # ── CLAHE contrast enhancement ───────────────────────────────────
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
 
         med = float(np.median(enhanced))
 
-        # ── Scale 1: Very fine — minimal smoothing, very low thresholds ──
-        very_fine = cv2.GaussianBlur(enhanced, (3, 3), 0.8)
-        edges_vfine = cv2.Canny(very_fine,
-                                max(3, int(med * 0.15)),
-                                min(150, int(med * 0.55)),
-                                apertureSize=3, L2gradient=True)
-
-        # ── Scale 2: Fine — light bilateral ──────────────────────────────
-        fine = cv2.bilateralFilter(enhanced, d=5, sigmaColor=30, sigmaSpace=30)
+        # ── Scale 1: Fine — bilateral preserves edges, moderate thresholds
+        fine = cv2.bilateralFilter(enhanced, d=7, sigmaColor=40, sigmaSpace=40)
         edges_fine = cv2.Canny(fine,
-                               max(5, int(med * 0.25)),
-                               min(200, int(med * 0.8)),
+                               max(10, int(med * 0.3)),
+                               min(200, int(med * 0.9)),
                                apertureSize=3, L2gradient=True)
 
-        # ── Scale 3: Coarse — strong smoothing for major edges ───────────
-        coarse = cv2.bilateralFilter(enhanced, d=9, sigmaColor=75, sigmaSpace=75)
+        # ── Scale 2: Coarse — strong smoothing for major structural edges
+        coarse = cv2.bilateralFilter(enhanced, d=11, sigmaColor=80, sigmaSpace=80)
         edges_coarse = cv2.Canny(coarse,
-                                  max(15, int(med * 0.5)),
+                                  max(20, int(med * 0.5)),
                                   min(250, int(med * 1.5)),
                                   apertureSize=3, L2gradient=True)
 
-        # ── Scale 4: Adaptive threshold for shadow/texture edges ─────────
-        block = max(31, min(int(min(h, w) * 0.04) | 1, 201))  # odd number
-        adapt = cv2.adaptiveThreshold(enhanced, 255,
-                                       cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY_INV,
-                                       blockSize=block, C=4)
-        # Extract edges from adaptive threshold via Canny on the thresholded image
-        edges_adapt = cv2.Canny(adapt, 50, 150)
+        # ── Combine edge maps (2-scale only, no adaptive = less noise) ──
+        edges = cv2.bitwise_or(edges_fine, edges_coarse)
 
-        # ── Combine all edge maps ────────────────────────────────────────
-        edges = cv2.bitwise_or(edges_vfine, edges_fine)
-        edges = cv2.bitwise_or(edges, edges_coarse)
-        edges = cv2.bitwise_or(edges, edges_adapt)
-
-        # ── Morphological: close small gaps, then thin to 1px ────────────
+        # ── Morphological: close small gaps ──────────────────────────────
         close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_k, iterations=1)
 
@@ -181,7 +163,7 @@ class FacadeDetector:
             edges, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1
         )
 
-        min_arc = 8.0  # lowered for finer detail capture
+        min_arc = 20.0  # filter out small noise fragments
 
         for i, cnt in enumerate(raw_contours):
             if len(cnt) < 2:
@@ -192,15 +174,15 @@ class FacadeDetector:
 
             area = cv2.contourArea(cnt)
 
-            # Very conservative simplification — keep maximum detail
-            epsilon = max(0.3, 0.001 * arc)
+            # Moderate simplification — balance detail vs noise
+            epsilon = max(0.5, 0.002 * arc)
             approx = cv2.approxPolyDP(cnt, epsilon, False)
 
             pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
             if len(pts) < 2:
                 continue
 
-            is_closed = len(pts) >= 4 and area > 80
+            is_closed = len(pts) >= 4 and area > 150
             if hierarchy is not None and hierarchy[0][i][2] >= 0:
                 is_closed = True
 
@@ -210,7 +192,7 @@ class FacadeDetector:
         lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
         lsd_lines = lsd.detect(enhanced)[0]
         if lsd_lines is not None:
-            min_len = max(h, w) * 0.015  # 1.5% of image dimension
+            min_len = max(h, w) * 0.025  # 2.5% — only meaningful lines
             for seg in lsd_lines:
                 x1, y1, x2, y2 = seg[0]
                 length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
