@@ -4,7 +4,7 @@ FROM node:20-alpine AS base
 FROM base AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm install
+RUN npm install --legacy-peer-deps
 
 # Build the application
 FROM base AS builder
