@@ -40,7 +40,7 @@ class TestApplyManualCoding:
         assert len(result) > len(dxf_bytes)
 
         # Parse result and check grid lines were added
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         msp = doc.modelspace()
         grid_entities = [e for e in msp if e.dxf.layer == "GRID_LINES"]
         assert len(grid_entities) >= 2  # At least 2 axis lines
@@ -57,7 +57,7 @@ class TestApplyManualCoding:
         }
 
         result = apply_manual_coding(dxf_bytes, config, 600)
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         msp = doc.modelspace()
         grid_entities = [e for e in msp if e.dxf.layer == "GRID_LINES"]
         assert len(grid_entities) >= 2
@@ -73,7 +73,7 @@ class TestApplyManualCoding:
         }
 
         result = apply_manual_coding(dxf_bytes, config, 600)
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         msp = doc.modelspace()
         text_entities = [e for e in msp if e.dxf.layer == "TEXT" and e.dxftype() == "TEXT"]
         assert any("2.40m" in e.dxf.text for e in text_entities)
@@ -87,7 +87,7 @@ class TestApplyManualCoding:
         }
 
         result = apply_manual_coding(dxf_bytes, config, 600)
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         msp = doc.modelspace()
         grid_lines = [e for e in msp if e.dxf.layer == "GRID_LINES" and e.dxftype() == "LINE"]
         # Should be capped at 30
@@ -102,7 +102,7 @@ class TestApplyManualCoding:
         }
 
         result = apply_manual_coding(dxf_bytes, config, 600)
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         msp = doc.modelspace()
         grid_lines = [e for e in msp if e.dxf.layer == "GRID_LINES" and e.dxftype() == "LINE"]
         assert len(grid_lines) <= 10
@@ -113,5 +113,5 @@ class TestApplyManualCoding:
 
         result = apply_manual_coding(dxf_bytes, config, 600)
         # Output should still be valid DXF
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         assert doc is not None

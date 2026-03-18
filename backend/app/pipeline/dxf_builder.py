@@ -76,10 +76,10 @@ def build_dxf(elements: list[VectorElement], image_width: int, image_height: int
     # Add border frame
     _add_border(msp, image_width, image_height)
 
-    # Save to bytes
-    stream = io.BytesIO()
+    # Save to bytes (ezdxf writes text, so use StringIO then encode)
+    stream = io.StringIO()
     doc.write(stream)
-    return stream.getvalue()
+    return stream.getvalue().encode("utf-8")
 
 
 def _add_rectangle(msp, element: VectorElement, layer: str, transform):
@@ -130,7 +130,7 @@ def add_dimensions_to_dxf(
     scale_factor: float = 1.0,
 ) -> bytes:
     """Add dimension annotations to an existing DXF."""
-    doc = ezdxf.read(io.BytesIO(dxf_bytes))
+    doc = ezdxf.read(io.StringIO(dxf_bytes.decode("utf-8")))
     msp = doc.modelspace()
 
     def transform_y(y: float) -> float:
@@ -158,9 +158,9 @@ def add_dimensions_to_dxf(
         # Height dimension to the right
         _add_linear_dimension_vertical(msp, (x_max, y_min), (x_max, y_max), x_max + 30, f"{height:.0f}")
 
-    stream = io.BytesIO()
+    stream = io.StringIO()
     doc.write(stream)
-    return stream.getvalue()
+    return stream.getvalue().encode("utf-8")
 
 
 def _add_linear_dimension(msp, p1, p2, text_y, text):
@@ -204,7 +204,7 @@ def add_coding_to_dxf(
     image_height: int,
 ) -> bytes:
     """Add manual coding (axis lines, text) to an existing DXF."""
-    doc = ezdxf.read(io.BytesIO(dxf_bytes))
+    doc = ezdxf.read(io.StringIO(dxf_bytes.decode("utf-8")))
     msp = doc.modelspace()
 
     def transform_y(y: float) -> float:
@@ -252,14 +252,14 @@ def add_coding_to_dxf(
             dxfattribs={"layer": "TEXT", "insert": (x, y)},
         ).set_placement((x, y), align=TextEntityAlignment.MIDDLE_CENTER)
 
-    stream = io.BytesIO()
+    stream = io.StringIO()
     doc.write(stream)
-    return stream.getvalue()
+    return stream.getvalue().encode("utf-8")
 
 
 def generate_preview(dxf_bytes: bytes) -> bytes:
     """Generate a PNG preview of the DXF file."""
-    doc = ezdxf.read(io.BytesIO(dxf_bytes))
+    doc = ezdxf.read(io.StringIO(dxf_bytes.decode("utf-8")))
 
     try:
         import matplotlib

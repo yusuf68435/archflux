@@ -35,12 +35,12 @@ class TestBuildDxf:
         ]
         result = build_dxf(elements, 800, 600)
         assert isinstance(result, bytes)
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         assert doc is not None
 
     def test_creates_all_layers(self):
         result = build_dxf([], 800, 600)
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         for layer_name in LAYERS:
             assert layer_name in doc.layers
 
@@ -54,7 +54,7 @@ class TestBuildDxf:
             ]),
         ]
         result = build_dxf(elements, 800, 600)
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         msp = doc.modelspace()
 
         layers_used = set(e.dxf.layer for e in msp)
@@ -66,7 +66,7 @@ class TestBuildDxf:
             _make_element("wall_outline", "line", [(0, 0), (800, 0)]),
         ]
         result = build_dxf(elements, 800, 600)
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         msp = doc.modelspace()
 
         lines = [e for e in msp if e.dxftype() == "LINE" and e.dxf.layer == "WALLS"]
@@ -77,7 +77,7 @@ class TestBuildDxf:
 
     def test_adds_border(self):
         result = build_dxf([], 800, 600)
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         msp = doc.modelspace()
 
         # Border is a closed LWPOLYLINE with color=8
@@ -95,7 +95,7 @@ class TestAddCodingToDxf:
         }
 
         result = add_coding_to_dxf(base_dxf, config, 600)
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         msp = doc.modelspace()
 
         grid_lines = [e for e in msp if e.dxf.layer == "GRID_LINES"]
@@ -117,7 +117,7 @@ class TestAddDimensionsToDxf:
         base_dxf = build_dxf(elements, 800, 600)
 
         result = add_dimensions_to_dxf(base_dxf, elements, 600)
-        doc = ezdxf.read(io.BytesIO(result))
+        doc = ezdxf.read(io.StringIO(result.decode("utf-8")))
         msp = doc.modelspace()
 
         dim_entities = [e for e in msp if e.dxf.layer == "DIMENSIONS"]
