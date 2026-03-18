@@ -55,7 +55,13 @@ export function ConversionPanel({ onJobStarted, onBack }: ConversionPanelProps) 
         inputImageUrl: uploadedUrl,
       };
 
-      if (cropRegion) payload.cropRegion = cropRegion;
+      if (cropRegion) {
+        if (jobType === "DETAIL_EXTRACTION") {
+          payload.detailRegion = cropRegion;
+        } else {
+          payload.cropRegion = cropRegion;
+        }
+      }
       if (jobType === "PARTIAL_SPLIT") {
         payload.splitConfig = { direction: splitDirection, parts: splitRows };
       }

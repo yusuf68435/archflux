@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { signIn } from "next-auth/react";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
@@ -63,6 +64,11 @@ export default function LoginPage() {
           </Button>
           <p className="mt-4 text-center text-xs text-muted-foreground">
             {t("termsNotice")}
+          </p>
+          <p className="mt-2 text-center text-xs text-muted-foreground">
+            <Link href="/privacy" className="underline underline-offset-2 hover:text-foreground">Gizlilik Politikası</Link>
+            {" · "}
+            <Link href="/terms" className="underline underline-offset-2 hover:text-foreground">Kullanım Şartları</Link>
           </p>
         </CardContent>
       </Card>

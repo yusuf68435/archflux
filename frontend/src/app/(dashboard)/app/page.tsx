@@ -105,6 +105,8 @@ export default function ConverterPage() {
         <DxfPreview
           dxfUrl={resultDxfUrl || ""}
           previewUrl={resultPreviewUrl || ""}
+          imageUrl={uploadedUrl || localPreviewUrl || undefined}
+          jobId={activeJobId || undefined}
           onNewConversion={reset}
           onContinueToCoding={() => setStep(5)}
         />

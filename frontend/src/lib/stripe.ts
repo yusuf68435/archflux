@@ -1,12 +1,25 @@
 import Stripe from "stripe";
 
-if (!process.env.STRIPE_SECRET_KEY) {
-  throw new Error("STRIPE_SECRET_KEY environment variable is required");
+// Lazy-initialize so the app doesn't crash when Stripe is not yet configured.
+let _stripe: Stripe | null = null;
+
+function getStripe(): Stripe {
+  const key = process.env.STRIPE_SECRET_KEY;
+  if (!key || key === "BURAYA_EKLE") {
+    throw new Error("Stripe not configured — set STRIPE_SECRET_KEY in the environment.");
+  }
+  if (!_stripe) {
+    _stripe = new Stripe(key, { apiVersion: "2026-02-25.clover", typescript: true });
+  }
+  return _stripe;
 }
 
-export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2026-02-25.clover",
-  typescript: true,
+// Proxy so existing code using `stripe.xxx` keeps working, but initialization
+// only happens on first actual API call (not at module load time).
+export const stripe = new Proxy({} as Stripe, {
+  get(_t, prop) {
+    return (getStripe() as unknown as Record<string, unknown>)[prop as string];
+  },
 });
 
 /**

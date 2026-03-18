@@ -10,6 +10,7 @@ import { CodingModeSelector } from "./coding-mode-selector";
 import { ManualCodingEditor } from "./manual-coding-editor";
 import { DxfViewer } from "./dxf-viewer";
 import { JobProgress } from "./job-progress";
+import { ErrorBoundary } from "@/components/ui/error-boundary";
 import { useConverterStore } from "@/stores/converter-store";
 import { useApplyCoding, useJobStatus } from "@/hooks/use-job";
 
@@ -125,7 +126,9 @@ export function CodingStep({
           <Badge className="bg-green-500">{t("codingComplete")}</Badge>
         </CardHeader>
         <CardContent className="space-y-4">
-          <DxfViewer dxfUrl={codedDxfUrl} />
+          <ErrorBoundary dxfUrl={codedDxfUrl}>
+            <DxfViewer dxfUrl={codedDxfUrl} />
+          </ErrorBoundary>
           <div className="flex gap-3">
             <Button
               onClick={() => {

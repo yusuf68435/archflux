@@ -1,20 +1,40 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { useJobStatus } from "@/hooks/use-job";
+import { useJobStatus, useCancelJob } from "@/hooks/use-job";
 
 interface JobProgressProps {
   jobId: string;
   onComplete: (dxfUrl: string, previewUrl: string, imageHeight?: number) => void;
+  onCancel?: () => void;
 }
 
-export function JobProgress({ jobId, onComplete }: JobProgressProps) {
+export function JobProgress({ jobId, onComplete, onCancel }: JobProgressProps) {
   const t = useTranslations("converter");
   const { data: job, error } = useJobStatus(jobId);
+  const cancelJob = useCancelJob();
+  const [showCancel, setShowCancel] = useState(false);
+
+  // Show cancel button after 5 seconds
+  useEffect(() => {
+    const timer = setTimeout(() => setShowCancel(true), 5000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  const handleCancel = async () => {
+    try {
+      await cancelJob.mutateAsync(jobId);
+      toast.info(t("cancelled"));
+      onCancel?.();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("cancelError"));
+    }
+  };
 
   const stageLabels: Record<string, string> = {
     downloading_image: t("stages.downloading"),
@@ -81,6 +101,18 @@ export function JobProgress({ jobId, onComplete }: JobProgressProps) {
             <div className="rounded-lg bg-destructive/10 p-4 text-sm text-destructive">
               {job?.errorMessage || t("failed")}
             </div>
+          )}
+
+          {showCancel && job?.status !== "COMPLETED" && job?.status !== "FAILED" && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCancel}
+              disabled={cancelJob.isPending}
+              className="text-muted-foreground hover:text-destructive hover:border-destructive"
+            >
+              {cancelJob.isPending ? t("cancelling") : t("cancel")}
+            </Button>
           )}
         </div>
       </CardContent>

@@ -18,10 +18,36 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const APP_URL = "https://archflux.yusuf435.duckdns.org";
+
 export const metadata: Metadata = {
-  title: "ArchFlux - Mimari Cephe DXF Donusturucu",
+  title: {
+    default: "ArchFlux — Mimari Cephe DXF Dönüştürücü",
+    template: "%s — ArchFlux",
+  },
   description:
-    "Yapay zeka destekli mimari cephe fotograflarindan profesyonel DXF CAD cizimleri uretin.",
+    "Yapay zeka destekli mimari cephe fotoğraflarından profesyonel DXF CAD çizimleri üretin. Saniyeler içinde hassas yapı cephesi çizimi.",
+  metadataBase: new URL(APP_URL),
+  openGraph: {
+    type: "website",
+    url: APP_URL,
+    siteName: "ArchFlux",
+    title: "ArchFlux — Mimari Cephe DXF Dönüştürücü",
+    description:
+      "Yapay zeka ile mimari cephe fotoğraflarını DXF'e dönüştürün. Hızlı, hassas, profesyonel.",
+    locale: "tr_TR",
+  },
+  twitter: {
+    card: "summary",
+    title: "ArchFlux — Mimari Cephe DXF Dönüştürücü",
+    description:
+      "Yapay zeka ile mimari cephe fotoğraflarını DXF'e dönüştürün.",
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: { index: true, follow: true },
+  },
 };
 
 export default async function RootLayout({

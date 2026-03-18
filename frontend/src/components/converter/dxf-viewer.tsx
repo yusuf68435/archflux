@@ -9,29 +9,49 @@ import type { CodingConfig } from "@/types/job";
 
 // Layer name → display color (matching ACI colors for SVG stroke)
 const LAYER_COLORS: Record<string, string> = {
-  WALLS: "#94a3b8",
-  WINDOWS: "#22c55e",
-  DOORS: "#ef4444",
-  BALCONIES: "#3b82f6",
-  MOLDINGS: "#eab308",
-  COLUMNS: "#a855f7",
-  DIMENSIONS: "#06b6d4",
-  GRID_LINES: "#6b7280",
+  // New semantic layers
+  "BUILDING-OUTLINE": "#ef4444",  // Red
+  "FLOOR-SLABS":      "#22c55e",  // Green
+  "COLUMNS":          "#a855f7",  // Magenta/Purple
+  "WINDOWS":          "#3b82f6",  // Blue
+  "DOORS":            "#f97316",  // Orange
+  "BALCONIES":        "#06b6d4",  // Cyan
+  "DIMENSIONS":       "#06b6d4",  // Cyan
+  "GRID-AXES":        "#6b7280",  // Gray
+  "ANNOTATIONS":      "#ffffff",  // White
+  "REFERENCE":        "#9ca3af",  // Light gray
+  // Legacy layer aliases (backward compat)
+  OUTLINE:     "#ef4444",
+  STRUCTURE:   "#22c55e",
+  DETAIL:      "#3b82f6",
+  WALLS:       "#94a3b8",
+  MOLDINGS:    "#eab308",
+  GRID_LINES:  "#6b7280",
   FLOOR_LINES: "#9ca3af",
-  TEXT: "#94a3b8",
+  TEXT:        "#94a3b8",
 };
 
 const LAYER_BG_COLORS: Record<string, string> = {
-  WALLS: "bg-slate-400",
-  WINDOWS: "bg-green-500",
-  DOORS: "bg-red-500",
-  BALCONIES: "bg-blue-500",
-  MOLDINGS: "bg-yellow-500",
-  COLUMNS: "bg-purple-500",
-  DIMENSIONS: "bg-cyan-500",
-  GRID_LINES: "bg-gray-500",
+  // New semantic layers
+  "BUILDING-OUTLINE": "bg-red-500",
+  "FLOOR-SLABS":      "bg-green-500",
+  "COLUMNS":          "bg-purple-500",
+  "WINDOWS":          "bg-blue-500",
+  "DOORS":            "bg-orange-500",
+  "BALCONIES":        "bg-cyan-500",
+  "DIMENSIONS":       "bg-cyan-500",
+  "GRID-AXES":        "bg-gray-500",
+  "ANNOTATIONS":      "bg-white",
+  "REFERENCE":        "bg-gray-400",
+  // Legacy
+  OUTLINE:     "bg-red-500",
+  STRUCTURE:   "bg-green-500",
+  DETAIL:      "bg-blue-500",
+  WALLS:       "bg-slate-400",
+  MOLDINGS:    "bg-yellow-500",
+  GRID_LINES:  "bg-gray-500",
   FLOOR_LINES: "bg-gray-400",
-  TEXT: "bg-slate-400",
+  TEXT:        "bg-slate-400",
 };
 
 interface ViewBox {

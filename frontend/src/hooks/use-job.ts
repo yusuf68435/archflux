@@ -104,6 +104,38 @@ export function useApplyCoding() {
 }
 
 /**
+ * Mutation to request a refund for a completed job.
+ */
+export function useRequestRefund() {
+  return useMutation({
+    mutationFn: ({ jobId, reason }: { jobId: string; reason: string }) =>
+      fetchJson<{ id: string }>(`/api/jobs/${jobId}/refund`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason }),
+      }),
+  });
+}
+
+/**
+ * Mutation to cancel an in-progress or queued job.
+ */
+export function useCancelJob() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (jobId: string) =>
+      fetchJson<{ success: boolean }>(`/api/jobs/${jobId}`, {
+        method: "DELETE",
+      }),
+    onSuccess: (_data, jobId) => {
+      queryClient.invalidateQueries({ queryKey: ["job", jobId] });
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
+}
+
+/**
  * Paginated query for the user's job history.
  */
 export function useJobHistory(page: number = 1) {

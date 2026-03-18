@@ -125,6 +125,45 @@ export async function GET(
   return NextResponse.json(job);
 }
 
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { id } = await params;
+
+  const job = await prisma.job.findFirst({
+    where: { id, userId: session.user.id },
+  });
+
+  if (!job) {
+    return NextResponse.json({ error: "Job not found" }, { status: 404 });
+  }
+
+  const body = await req.json();
+
+  // Only allow updating scaleRef for now
+  const updates: Record<string, unknown> = {};
+  if (body.scaleRef !== undefined) {
+    updates.scaleRef = body.scaleRef;
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return NextResponse.json({ error: "No valid fields to update" }, { status: 400 });
+  }
+
+  const updated = await prisma.job.update({
+    where: { id },
+    data: updates,
+  });
+
+  return NextResponse.json(updated);
+}
+
 export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -144,16 +183,28 @@ export async function DELETE(
     return NextResponse.json({ error: "Job not found" }, { status: 404 });
   }
 
-  if (!["PENDING", "QUEUED"].includes(job.status)) {
+  if (!["PENDING", "QUEUED", "PROCESSING"].includes(job.status)) {
     return NextResponse.json(
-      { error: "Can only cancel pending/queued jobs" },
+      { error: "Can only cancel pending/queued/processing jobs" },
       { status: 400 }
     );
   }
 
+  // Attempt to revoke Celery task if running
+  if (job.celeryTaskId) {
+    try {
+      await fetch(
+        `${process.env.AI_SERVICE_URL}/tasks/${job.celeryTaskId}`,
+        { method: "DELETE", headers: { "X-API-Key": process.env.AI_SERVICE_API_KEY || "" } }
+      );
+    } catch {
+      // Best-effort — continue with DB update even if revoke fails
+    }
+  }
+
   await prisma.job.update({
     where: { id },
-    data: { status: "CANCELLED" },
+    data: { status: "CANCELLED", cancelledAt: new Date() },
   });
 
   return NextResponse.json({ success: true });
