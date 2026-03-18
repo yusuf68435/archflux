@@ -27,6 +27,8 @@ limiter = Limiter(key_func=get_remote_address, default_limits=[settings.RATE_LIM
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print(f"Starting {settings.APP_NAME}...")
+    from app.core.storage import ensure_buckets_exist
+    ensure_buckets_exist()
     yield
     print(f"Shutting down {settings.APP_NAME}...")
 
