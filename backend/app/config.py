@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     S3_BUCKET_UPLOADS: str = "uploads"
     S3_BUCKET_RESULTS: str = "results"
     S3_REGION: str = "us-east-1"
+    S3_PUBLIC_URL: str = ""  # Public base URL for file access (e.g. https://domain.com)
 
     # AI Models
     YOLO_WEIGHTS: str = "yolov8x.pt"

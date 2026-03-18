@@ -26,7 +26,8 @@ def get_s3_client():
 def upload_file(bucket: str, key: str, data: BinaryIO, content_type: str = "application/octet-stream") -> str:
     client = get_s3_client()
     client.upload_fileobj(data, bucket, key, ExtraArgs={"ContentType": content_type})
-    return f"{settings.S3_ENDPOINT}/{bucket}/{key}"
+    base_url = settings.S3_PUBLIC_URL or settings.S3_ENDPOINT
+    return f"{base_url}/{bucket}/{key}"
 
 
 def upload_bytes(bucket: str, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
