@@ -1,176 +1,637 @@
-"""Stage 2: Facade Element Detection using YOLOv8
+"""Stage 2: Facade Structure Extraction
 
-Detects architectural elements: windows, doors, balconies, moldings,
-columns, railings, shutters, AC units, signage, roof edges, floor lines.
+LSD-based architectural line detection with multi-evidence window scoring:
+1. Find building bounds via edge-density projection + sky detection
+2. Detect floor slab lines via LSD horizontal segments + spacing regularization
+3. Detect column/wall lines via LSD vertical segments + bay regularization
+4. Detect window openings via multi-evidence grid cell scoring
+   (darkness + texture variance + edge density at boundary)
+5. Detect balcony slabs via horizontal protrusion from building profile
 """
 
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
-
-from app.config import settings
 
 
 @dataclass
 class Detection:
-    bbox: tuple[float, float, float, float]  # x1, y1, x2, y2
+    bbox: tuple[float, float, float, float]
     class_name: str
     class_id: int
     confidence: float
 
 
-# Facade element classes for fine-tuned model
-FACADE_CLASSES = {
-    0: "window",
-    1: "door",
-    2: "balcony",
-    3: "molding",
-    4: "column",
-    5: "railing",
-    6: "shutter",
-    7: "ac_unit",
-    8: "signage",
-    9: "roof_edge",
-    10: "floor_line",
-    11: "wall_section",
-}
+@dataclass
+class TracedLine:
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    width: float
+    layer: str
 
-# COCO class IDs that map to facade elements (for pre-trained model)
-COCO_FACADE_MAP = {
-    # COCO doesn't have direct facade classes, but some overlap
-    # We'll use the pretrained model for initial detection
-    # and add facade-specific detection later
-}
+
+@dataclass
+class TracedContour:
+    points: list[tuple[float, float]]
+    layer: str
+    closed: bool
 
 
 class FacadeDetector:
-    def __init__(self):
-        self.model = None
-        self._loaded = False
 
     def load(self):
-        """Load YOLO model weights."""
-        if self._loaded:
-            return
-
-        from ultralytics import YOLO
-
-        self.model = YOLO(settings.YOLO_WEIGHTS)
-        if settings.DEVICE == "cuda":
-            self.model.to("cuda")
-        self._loaded = True
-
-    def detect(self, image: np.ndarray, confidence: float | None = None) -> list[Detection]:
-        """Run detection on image, return list of detections."""
-        if not self._loaded:
-            self.load()
-
-        if confidence is None:
-            confidence = settings.CONFIDENCE_THRESHOLD
-
-        results = self.model(image, conf=confidence, verbose=False)
-
-        detections = []
-        for result in results:
-            boxes = result.boxes
-            if boxes is None:
-                continue
-
-            for i in range(len(boxes)):
-                bbox = boxes.xyxy[i].cpu().numpy()
-                cls_id = int(boxes.cls[i].cpu().numpy())
-                conf = float(boxes.conf[i].cpu().numpy())
-                cls_name = result.names.get(cls_id, f"class_{cls_id}")
-
-                detections.append(
-                    Detection(
-                        bbox=(float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])),
-                        class_name=cls_name,
-                        class_id=cls_id,
-                        confidence=conf,
-                    )
-                )
-
-        return detections
+        pass
 
     def detect_facades(self, image: np.ndarray) -> list[Detection]:
-        """Detect facade-specific elements.
+        return []
 
-        Uses pretrained YOLO for initial detection, filtering for
-        architecture-relevant classes. Will be replaced with fine-tuned
-        model after training.
-        """
-        all_detections = self.detect(image)
-
-        # For pretrained COCO model, we use a heuristic approach:
-        # detect all objects, then use edge detection for architectural elements
-        # that COCO doesn't cover (windows, moldings, etc.)
-        facade_detections = all_detections
-
-        # Add edge-based window detection as supplement
-        window_detections = self._detect_windows_by_edges(image)
-        facade_detections.extend(window_detections)
-
-        return facade_detections
-
-    def _detect_windows_by_edges(self, image: np.ndarray) -> list[Detection]:
-        """Fallback window detection using classical CV when YOLO misses them.
-
-        Uses edge detection + contour analysis to find rectangular regions
-        that are likely windows.
-        """
-        import cv2
-
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-        # Adaptive threshold for better edge detection
-        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
-
-        # Morphological operations to clean up
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
+    def trace_edges(self, image: np.ndarray) -> tuple[list[TracedLine], list[TracedContour], dict]:
         h, w = image.shape[:2]
-        image_area = h * w
-        detections = []
 
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            # Filter by area: windows are typically 0.5%-10% of image
-            if area < image_area * 0.005 or area > image_area * 0.1:
-                continue
+        # Downscale to ~900px for processing speed
+        scale = 1.0
+        target = 900
+        if max(h, w) > target:
+            scale = max(h, w) / target
+            work = cv2.resize(image, (int(w / scale), int(h / scale)),
+                              interpolation=cv2.INTER_AREA)
+        else:
+            work = image.copy()
 
-            # Check rectangularity
-            rect = cv2.minAreaRect(contour)
-            box = cv2.boxPoints(rect)
-            rect_area = rect[1][0] * rect[1][1]
-            if rect_area == 0:
-                continue
+        wh, ww = work.shape[:2]
 
-            rectangularity = area / rect_area
-            if rectangularity < 0.7:  # Must be fairly rectangular
-                continue
+        # 1. Building boundary
+        top, bottom, left, right = self._find_building_bounds(work, wh, ww)
 
-            # Check aspect ratio (windows are roughly 1:1.2 to 1:2.5)
-            aspect = max(rect[1]) / (min(rect[1]) + 1e-6)
-            if aspect > 3.0 or aspect < 0.8:
-                continue
+        # 2. Floor lines (LSD horizontal segments)
+        floor_ys = self._detect_floor_lines_lsd(work, top, bottom, left, right)
 
-            x, y, bw, bh = cv2.boundingRect(contour)
-            detections.append(
-                Detection(
-                    bbox=(float(x), float(y), float(x + bw), float(y + bh)),
-                    class_name="window",
-                    class_id=0,
-                    confidence=0.6 * rectangularity,
-                )
+        # 3. Column lines (LSD vertical segments)
+        column_xs = self._detect_column_lines_lsd(work, top, bottom, left, right)
+
+        # 4. Windows (multi-evidence grid scoring or adaptive fallback)
+        # Always include building left/right as grid boundaries so grid covers full width
+        grid_xs = sorted(set([float(left)] + column_xs + [float(right)]))
+        if len(floor_ys) >= 2:
+            windows = self._score_windows_from_grid(
+                work, top, bottom, left, right, floor_ys, grid_xs
             )
+        else:
+            windows = self._detect_windows_adaptive(work, top, bottom, left, right)
 
-        return detections
+        # 5. Balcony detection
+        balconies = self._detect_balconies(work, top, bottom, left, right, floor_ys)
+
+        lines: list[TracedLine] = []
+        contours: list[TracedContour] = []
+
+        # Building outline polygon
+        contours.append(TracedContour(
+            points=[
+                (float(left), float(top)),
+                (float(right), float(top)),
+                (float(right), float(bottom)),
+                (float(left), float(bottom)),
+            ],
+            layer="outline",
+            closed=True,
+        ))
+
+        # Floor lines — full building width
+        for fy in floor_ys:
+            lines.append(TracedLine(
+                x1=float(left), y1=float(fy),
+                x2=float(right), y2=float(fy),
+                width=1.0, layer="structure",
+            ))
+
+        # Column lines — full building height
+        for cx in column_xs:
+            lines.append(TracedLine(
+                x1=float(cx), y1=float(top),
+                x2=float(cx), y2=float(bottom),
+                width=1.0, layer="structure",
+            ))
+
+        contours.extend(windows)
+        contours.extend(balconies)
+
+        # Build window rects before scaling
+        window_rects = []
+        for w_contour in windows:
+            xs = [p[0] for p in w_contour.points]
+            ys = [p[1] for p in w_contour.points]
+            window_rects.append({
+                "x": min(xs), "y": min(ys),
+                "w": max(xs) - min(xs), "h": max(ys) - min(ys),
+            })
+
+        # Scale back to original resolution
+        if scale > 1.0:
+            floor_ys = [y * scale for y in floor_ys]
+            column_xs = [x * scale for x in column_xs]
+            window_rects = [{
+                "x": r["x"] * scale, "y": r["y"] * scale,
+                "w": r["w"] * scale, "h": r["h"] * scale,
+            } for r in window_rects]
+            lines = [TracedLine(
+                x1=l.x1 * scale, y1=l.y1 * scale,
+                x2=l.x2 * scale, y2=l.y2 * scale,
+                width=l.width, layer=l.layer,
+            ) for l in lines]
+            contours = [TracedContour(
+                points=[(p[0] * scale, p[1] * scale) for p in c.points],
+                layer=c.layer, closed=c.closed,
+            ) for c in contours]
+
+        detect_meta = {
+            "floor_ys": floor_ys,
+            "column_xs": column_xs,
+            "window_rects": window_rects,
+        }
+
+        return lines, contours, detect_meta
+
+    # ─── Building boundary ────────────────────────────────────────────────────
+
+    def _find_building_bounds(self, image: np.ndarray, h: int, w: int
+                               ) -> tuple[int, int, int, int]:
+        """Find building bounding box via edge-density + sky-detection."""
+        # Sky detection: high V, low S in HSV
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        sky_mask = cv2.inRange(hsv,
+                               np.array([85, 0, 160]),
+                               np.array([140, 80, 255]))
+        # Also include white/gray overcast sky
+        gray_sky = cv2.inRange(hsv,
+                               np.array([0, 0, 180]),
+                               np.array([180, 30, 255]))
+        sky_mask = cv2.bitwise_or(sky_mask, gray_sky)
+
+        # Find topmost row that is NOT predominantly sky
+        sky_rows = np.sum(sky_mask, axis=1)
+        sky_row_frac = sky_rows / (w * 255 + 1e-6)
+        top = 0
+        for r in range(h):
+            if sky_row_frac[r] < 0.50:
+                top = max(0, r - int(h * 0.01))
+                break
+
+        # Edge density for left/right/bottom
+        blurred = cv2.GaussianBlur(image, (11, 11), 4)
+        gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 25, 70)
+
+        # Row projection for bottom
+        row_proj = np.sum(edges, axis=1).astype(float)
+        row_proj = self._smooth1d(row_proj, max(3, h // 40))
+        row_thresh = np.max(row_proj) * 0.10
+
+        bottom = h - 1
+        for r in range(h - 1, top, -1):
+            if row_proj[r] > row_thresh:
+                bottom = min(h - 1, r + int(h * 0.01))
+                break
+
+        # Column projection for left/right (within building rows)
+        col_proj = np.sum(edges[top:bottom, :], axis=0).astype(float)
+        col_proj = self._smooth1d(col_proj, max(3, w // 40))
+        col_thresh = np.max(col_proj) * 0.07
+
+        left = 0
+        for c in range(w):
+            if col_proj[c] > col_thresh:
+                left = max(0, c - int(w * 0.01))
+                break
+
+        right = w - 1
+        for c in range(w - 1, -1, -1):
+            if col_proj[c] > col_thresh:
+                right = min(w - 1, c + int(w * 0.01))
+                break
+
+        # Sanity guards
+        if bottom - top < h * 0.15:
+            top, bottom = int(h * 0.05), int(h * 0.90)
+        if right - left < w * 0.15:
+            left, right = int(w * 0.05), int(w * 0.95)
+
+        return int(top), int(bottom), int(left), int(right)
+
+    # ─── LSD floor detection ─────────────────────────────────────────────────
+
+    def _detect_floor_lines_lsd(self, image: np.ndarray, top: int, bottom: int,
+                                  left: int, right: int) -> list[float]:
+        """Detect horizontal floor/slab lines using LSD + clustering."""
+        roi = image[top:bottom, left:right]
+        if roi.size == 0:
+            return []
+
+        roi_h = bottom - top
+        gray = self._smooth_gray(roi)
+
+        # LSD (Line Segment Detector) — much more reliable than HoughLines
+        lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
+        lines_raw = lsd.detect(gray)[0]
+
+        if lines_raw is None or len(lines_raw) == 0:
+            return self._sobel_floor_fallback(roi, roi_h, top)
+
+        min_length = roi_h * 0.08  # at least 8% of building height
+        h_ys: list[float] = []
+
+        for seg in lines_raw:
+            x1, y1, x2, y2 = seg[0]
+            angle = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+            length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+            is_horizontal = angle < 12 or angle > 168
+            if is_horizontal and length >= min_length:
+                h_ys.append((y1 + y2) / 2)
+
+        if not h_ys:
+            return self._sobel_floor_fallback(roi, roi_h, top)
+
+        # Cluster nearby Y values
+        clustered = self._cluster_values(h_ys, threshold=roi_h * 0.025)
+        # Regularize spacing
+        clustered = self._regularize_spacing(clustered, roi_h)
+        # Keep strong candidates (not sky area)
+        clustered = [y for y in clustered if y > roi_h * 0.03]
+
+        return [float(top + y) for y in sorted(clustered)[:16]]
+
+    def _sobel_floor_fallback(self, roi: np.ndarray, roi_h: int, top: int) -> list[float]:
+        """Fallback: Sobel-Y projection peaks."""
+        gray = self._smooth_gray(roi)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        row_proj = np.sum(np.abs(sobel_y), axis=1)
+        min_sp = max(int(roi_h * 0.06), 8)
+        local_ys = self._find_peaks(row_proj, min_sp, percentile=72, max_peaks=16)
+        return [float(top + y) for y in local_ys]
+
+    # ─── LSD column detection ─────────────────────────────────────────────────
+
+    def _detect_column_lines_lsd(self, image: np.ndarray, top: int, bottom: int,
+                                   left: int, right: int) -> list[float]:
+        """Detect vertical column/wall lines using LSD + Sobel projection (combined)."""
+        roi = image[top:bottom, left:right]
+        if roi.size == 0:
+            return []
+
+        roi_h = bottom - top
+        roi_w = right - left
+        gray = self._smooth_gray(roi)
+
+        v_xs: list[float] = []
+
+        # LSD: tall vertical segments spanning multiple floors (structural columns)
+        lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
+        lines_raw = lsd.detect(gray)[0]
+        if lines_raw is not None and len(lines_raw) > 0:
+            min_length = roi_h * 0.10  # must span ≥10% of building height
+            for seg in lines_raw:
+                x1, y1, x2, y2 = seg[0]
+                angle = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+                length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+                is_vertical = 75 < angle < 105
+                if is_vertical and length >= min_length:
+                    v_xs.append((x1 + x2) / 2)
+
+        # Sobel-X projection: finds major vertical edge clusters (bay divisions)
+        # Use high percentile + wide min_spacing to find structural bays, not window frames
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        col_proj = np.sum(np.abs(sobel_x), axis=0)
+        min_sp = max(int(roi_w * 0.07), 10)   # bay must be ≥7% of width
+        sobel_xs = self._find_peaks(col_proj, min_sp, percentile=88, max_peaks=10)
+        v_xs.extend([float(x) for x in sobel_xs])
+
+        if not v_xs:
+            return []
+
+        # Cluster + regularize
+        clustered = self._cluster_values(v_xs, threshold=roi_w * 0.04)
+        # Remove edge positions (building outline already captured separately)
+        margin = roi_w * 0.055
+        clustered = [x for x in clustered if margin < x < roi_w - margin]
+        clustered = self._regularize_spacing(clustered, roi_w, min_count=2)
+        return [float(left + x) for x in sorted(clustered)[:14]]
+
+    # ─── Multi-evidence window scoring ───────────────────────────────────────
+
+    def _score_windows_from_grid(
+        self,
+        image: np.ndarray,
+        top: int, bottom: int, left: int, right: int,
+        floor_ys: list[float],
+        column_xs: list[float],
+    ) -> list[TracedContour]:
+        """Score each structural grid cell using multiple evidence channels."""
+        roi = image[top:bottom, left:right]
+        if roi.size == 0:
+            return []
+
+        roi_h, roi_w = roi.shape[:2]
+
+        # Prepare analysis channels
+        blurred = cv2.GaussianBlur(roi, (7, 7), 2)
+        gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
+        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        edges = cv2.Canny(gray, 30, 90)
+
+        mean_lum = float(np.mean(gray))
+
+        # Build grid boundaries
+        ys = sorted(set([0] + [int(fy - top) for fy in floor_ys] + [roi_h]))
+        xs = sorted(set([0] + [int(cx - left) for cx in column_xs] + [roi_w]))
+
+        # Per-row score for cross-cell consistency
+        row_scores: dict[int, list[float]] = {}
+
+        cell_scores: list[tuple[int, int, float, int, int, int, int]] = []
+
+        for i in range(len(ys) - 1):
+            for j in range(len(xs) - 1):
+                y1, y2 = ys[i], ys[i + 1]
+                x1, x2 = xs[j], xs[j + 1]
+                cw, ch = x2 - x1, y2 - y1
+
+                # Skip cells too small or too large
+                if cw < roi_w * 0.03 or ch < roi_h * 0.03:
+                    continue
+                if cw > roi_w * 0.75 or ch > roi_h * 0.50:
+                    continue
+
+                cell_gray = gray[y1:y2, x1:x2]
+                cell_lap  = laplacian[y1:y2, x1:x2]
+
+                # Evidence 1: Darkness (windows are dark)
+                cell_mean = float(np.mean(cell_gray))
+                darkness = max(0.0, 1.0 - cell_mean / (mean_lum + 1e-6))
+
+                # Evidence 2: Low texture (glass is homogeneous)
+                texture_var = float(np.std(np.abs(cell_lap)))
+                texture_score = 1.0 / (1.0 + texture_var / 80.0)
+
+                # Evidence 3: Edge density at cell boundary (windows have clear frames)
+                boundary_mask = np.zeros_like(edges[y1:y2, x1:x2])
+                bw = max(3, min(cw // 8, 12))
+                bh = max(3, min(ch // 8, 12))
+                boundary_mask[:bh, :] = 1
+                boundary_mask[-bh:, :] = 1
+                boundary_mask[:, :bw] = 1
+                boundary_mask[:, -bw:] = 1
+                cell_edges = edges[y1:y2, x1:x2]
+                edge_density = float(np.sum(cell_edges * boundary_mask)) / (
+                    boundary_mask.sum() * 255 + 1e-6
+                )
+
+                score = 0.45 * darkness + 0.35 * texture_score + 0.20 * edge_density
+                row_scores.setdefault(i, []).append(score)
+                cell_scores.append((i, j, score, x1, y1, x2, y2))
+
+        # Cross-row consistency boost: if neighbors on same floor also score well
+        windows: list[TracedContour] = []
+        base_threshold = 0.28
+
+        for i, j, score, x1, y1, x2, y2 in cell_scores:
+            row = row_scores.get(i, [score])
+            row_mean = float(np.mean(row))
+            # If this row generally scores high, lower threshold slightly
+            threshold = base_threshold * (0.85 if row_mean > base_threshold else 1.0)
+
+            if score >= threshold:
+                mx = max(4, int((x2 - x1) * 0.10))
+                my = max(4, int((y2 - y1) * 0.08))
+                fx1 = left + x1 + mx
+                fx2 = left + x2 - mx
+                fy1 = top  + y1 + my
+                fy2 = top  + y2 - my
+                if fx2 > fx1 and fy2 > fy1:
+                    windows.append(TracedContour(
+                        points=[
+                            (float(fx1), float(fy1)),
+                            (float(fx2), float(fy1)),
+                            (float(fx2), float(fy2)),
+                            (float(fx1), float(fy2)),
+                        ],
+                        layer="detail",
+                        closed=True,
+                    ))
+
+        return windows
+
+    # ─── Adaptive window detection (fallback) ─────────────────────────────────
+
+    def _detect_windows_adaptive(self, image: np.ndarray, top: int, bottom: int,
+                                   left: int, right: int) -> list[TracedContour]:
+        """Adaptive threshold + contour fallback when no structural grid is found."""
+        roi = image[top:bottom, left:right]
+        if roi.size == 0:
+            return []
+
+        roi_h, roi_w = roi.shape[:2]
+        gray = self._smooth_gray(roi, extra_bilateral=2)
+
+        block_size = int(min(roi_h, roi_w) * 0.09)
+        if block_size % 2 == 0:
+            block_size += 1
+        block_size = max(21, min(block_size, 181))
+
+        thresh = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, blockSize=block_size, C=6,
+        )
+        k = np.ones((4, 4), np.uint8)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, k)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, k)
+
+        raw_cnts, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        min_side = min(roi_h, roi_w) * 0.025
+        min_area = roi_h * roi_w * 0.003
+        max_area = roi_h * roi_w * 0.08
+        max_w = roi_w * 0.45
+        max_h = roi_h * 0.28
+
+        bboxes: list[tuple[int, int, int, int]] = []
+        for cnt in raw_cnts:
+            area = cv2.contourArea(cnt)
+            if area < min_area or area > max_area:
+                continue
+            x, y, cw, ch = cv2.boundingRect(cnt)
+            if cw < min_side or ch < min_side or cw > max_w or ch > max_h:
+                continue
+            if max(cw, ch) / (min(cw, ch) + 1e-6) > 4.0:
+                continue
+            bboxes.append((x, y, cw, ch))
+
+        bboxes = self._nms_boxes(bboxes, 0.30)
+
+        windows: list[TracedContour] = []
+        for (x, y, cw, ch) in bboxes[:30]:
+            fx, fy = left + x, top + y
+            windows.append(TracedContour(
+                points=[
+                    (float(fx), float(fy)),
+                    (float(fx + cw), float(fy)),
+                    (float(fx + cw), float(fy + ch)),
+                    (float(fx), float(fy + ch)),
+                ],
+                layer="detail",
+                closed=True,
+            ))
+        return windows
+
+    # ─── Balcony detection ────────────────────────────────────────────────────
+
+    def _detect_balconies(self, image: np.ndarray, top: int, bottom: int,
+                           left: int, right: int,
+                           floor_ys: list[float]) -> list[TracedContour]:
+        """Detect balcony slabs via horizontal protrusion & railing density."""
+        if len(floor_ys) < 2:
+            return []
+
+        roi = image[top:bottom, left:right]
+        if roi.size == 0:
+            return []
+
+        roi_h, roi_w = roi.shape[:2]
+        gray = cv2.cvtColor(cv2.GaussianBlur(roi, (5, 5), 2), cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 30, 80)
+
+        balconies: list[TracedContour] = []
+
+        for k in range(len(floor_ys) - 1):
+            y1_f = int(floor_ys[k] - top)
+            y2_f = int(floor_ys[k + 1] - top)
+            if y2_f <= y1_f or y2_f - y1_f < roi_h * 0.04:
+                continue
+
+            band = edges[y1_f:y2_f, :]
+            row_density = np.sum(band, axis=1) / (roi_w * 255 + 1e-6)
+            mean_density = float(np.mean(row_density))
+
+            # High horizontal edge density in the band → likely railing/balcony
+            # Use strict thresholds to avoid false positives from floor slab edges
+            if mean_density > 0.18:
+                # Check if there's a protrusion: left/right non-background pixels
+                band_gray = gray[y1_f:y2_f, :]
+                # Count dark rows (balcony slab tends to be darker than wall)
+                dark_frac = float(np.mean(band_gray < np.mean(gray) * 0.80))
+                if dark_frac > 0.45:
+                    # Add thin balcony slab as a contour (top of the band)
+                    slab_y = float(top + y1_f + int((y2_f - y1_f) * 0.15))
+                    balconies.append(TracedContour(
+                        points=[
+                            (float(left), slab_y),
+                            (float(left + roi_w), slab_y),
+                            (float(left + roi_w), slab_y + max(4, (y2_f - y1_f) * 0.08)),
+                            (float(left), slab_y + max(4, (y2_f - y1_f) * 0.08)),
+                        ],
+                        layer="balcony",
+                        closed=True,
+                    ))
+
+        return balconies[:8]
+
+    # ─── Helpers ─────────────────────────────────────────────────────────────
+
+    def _smooth_gray(self, image: np.ndarray, extra_bilateral: int = 2) -> np.ndarray:
+        blurred = cv2.GaussianBlur(image, (7, 7), 2)
+        for _ in range(extra_bilateral):
+            blurred = cv2.bilateralFilter(blurred, d=9, sigmaColor=65, sigmaSpace=65)
+        return cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
+
+    def _smooth1d(self, arr: np.ndarray, kernel: int = 5) -> np.ndarray:
+        if kernel < 3:
+            return arr
+        if kernel % 2 == 0:
+            kernel += 1
+        return np.convolve(arr, np.ones(kernel) / kernel, mode="same")
+
+    def _cluster_values(self, values: list[float], threshold: float) -> list[float]:
+        """Cluster nearby values and return cluster medians."""
+        if not values:
+            return []
+        vals = sorted(values)
+        clusters: list[list[float]] = [[vals[0]]]
+        for v in vals[1:]:
+            if v - clusters[-1][-1] < threshold:
+                clusters[-1].append(v)
+            else:
+                clusters.append([v])
+        return [float(np.median(c)) for c in clusters]
+
+    def _regularize_spacing(self, positions: list[float], span: float,
+                              min_count: int = 3) -> list[float]:
+        """If spacing variance is low, snap to a uniform grid."""
+        if len(positions) < min_count:
+            return positions
+        positions = sorted(positions)
+        spacings = [positions[i + 1] - positions[i] for i in range(len(positions) - 1)]
+        if not spacings:
+            return positions
+        median_sp = float(np.median(spacings))
+        std_sp = float(np.std(spacings))
+        if median_sp <= 0 or std_sp / median_sp > 0.22:
+            return positions  # Too irregular — leave as-is
+        # Snap to uniform grid
+        base = positions[0]
+        return [base + i * median_sp for i in range(len(positions))]
+
+    def _find_peaks(self, projection: np.ndarray, min_spacing: int,
+                    percentile: float = 75, max_peaks: int = 20) -> list[int]:
+        if len(projection) == 0:
+            return []
+        smoothed = self._smooth1d(projection, min_spacing // 2 * 2 + 1)
+        threshold = np.percentile(smoothed, percentile)
+        peaks: list[int] = []
+        i, n = 0, len(smoothed)
+        while i < n:
+            if smoothed[i] > threshold:
+                j = i
+                while j < n and smoothed[j] > threshold:
+                    j += 1
+                peak = int(i + np.argmax(smoothed[i:j]))
+                peaks.append(peak)
+                i = j + min_spacing
+            else:
+                i += 1
+        peaks.sort(key=lambda p: smoothed[p], reverse=True)
+        peaks = peaks[:max_peaks]
+        peaks.sort()
+        return peaks
+
+    def _nms_boxes(self, boxes: list[tuple[int, int, int, int]],
+                   iou_threshold: float = 0.3) -> list[tuple[int, int, int, int]]:
+        if not boxes:
+            return []
+        boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)
+        kept: list[tuple[int, int, int, int]] = []
+        suppressed: set[int] = set()
+        for i, a in enumerate(boxes):
+            if i in suppressed:
+                continue
+            kept.append(a)
+            ax1, ay1, aw, ah = a
+            ax2, ay2 = ax1 + aw, ay1 + ah
+            for j in range(i + 1, len(boxes)):
+                if j in suppressed:
+                    continue
+                bx1, by1, bw, bh = boxes[j]
+                bx2, by2 = bx1 + bw, by1 + bh
+                ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+                ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+                inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                if inter == 0:
+                    continue
+                union = aw * ah + bw * bh - inter
+                if inter / (union + 1e-6) > iou_threshold:
+                    suppressed.add(j)
+        return kept
 
 
-# Singleton instance
 facade_detector = FacadeDetector()

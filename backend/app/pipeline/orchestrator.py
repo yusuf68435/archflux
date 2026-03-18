@@ -1,17 +1,20 @@
 """Pipeline Orchestrator
 
-Chains all 6 pipeline stages and manages progress reporting.
+Chains pipeline stages and manages progress reporting.
+Uses edge-tracing approach: image → edges → vectors → DXF.
 """
 
 import time
 from datetime import datetime, timezone
 from typing import Callable
 
+import numpy as np
+
 from app.config import settings
 from app.core.storage import download_file, upload_bytes
 from app.pipeline.auto_coder import generate_auto_coding
 from app.pipeline.detector import facade_detector
-from app.pipeline.dxf_builder import add_dimensions_to_dxf, build_dxf, generate_preview
+from app.pipeline.dxf_builder import build_dxf_from_traces, generate_preview
 from app.pipeline.manual_coder import apply_manual_coding
 from app.pipeline.preprocessor import (
     crop_region as crop_region_fn,
@@ -20,9 +23,7 @@ from app.pipeline.preprocessor import (
     preprocess_image,
     split_image,
 )
-from app.pipeline.regularizer import regularize_elements
-from app.pipeline.segmentor import facade_segmentor
-from app.pipeline.vectorizer import vectorize_elements
+from app.pipeline.regularizer import regularize_traces
 
 
 def run_full_pipeline(
@@ -38,7 +39,7 @@ def run_full_pipeline(
         if progress_callback:
             progress_callback(progress, stage)
 
-    # Stage 1: Preprocessing (0-15%)
+    # Stage 1: Preprocessing
     report(0, "downloading_image")
     bucket, key = _parse_s3_url(image_url)
     image_data = download_file(bucket, key)
@@ -52,36 +53,25 @@ def run_full_pipeline(
     h, w = image.shape[:2]
     report(15, "preprocessing_complete")
 
-    # Stage 2: Detection (15-35%)
-    report(20, "detecting_elements")
-    detections = facade_detector.detect_facades(image)
-    report(35, "detection_complete")
+    # Stage 2: Edge tracing
+    report(20, "tracing_edges")
+    lines, contours, detect_meta = facade_detector.trace_edges(image)
 
-    # Stage 3: Segmentation (35-55%)
-    report(40, "segmenting_elements")
-    segments = facade_segmentor.segment(image, detections)
-    report(55, "segmentation_complete")
+    # Stage 3: Geometric regularization (merge duplicates, snap to grid)
+    report(45, "regularizing")
+    lines, contours = regularize_traces(lines, contours, w, h)
+    report(50, "tracing_complete")
 
-    # Stage 4: Vectorization (55-75%)
-    report(60, "vectorizing")
-    elements = vectorize_elements(image, segments)
-    report(75, "vectorization_complete")
-
-    # Stage 5: Regularization (75-85%)
-    report(78, "regularizing")
-    elements = regularize_elements(elements, (h, w))
-    report(85, "regularization_complete")
-
-    # Stage 6: DXF Generation (85-95%)
-    report(88, "generating_dxf")
-    dxf_bytes = build_dxf(elements, w, h)
+    # Stage 3: Build DXF from traced edges
+    report(60, "generating_dxf")
+    dxf_bytes = build_dxf_from_traces(lines, contours, w, h)
 
     # Generate preview
-    report(92, "generating_preview")
+    report(80, "generating_preview")
     preview_bytes = generate_preview(dxf_bytes)
 
     # Upload results
-    report(95, "uploading_results")
+    report(90, "uploading_results")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     dxf_url = upload_bytes(
@@ -103,15 +93,25 @@ def run_full_pipeline(
     processing_time = time.time() - start_time
     report(100, "complete")
 
+    # Collect layer info
+    layers = set()
+    for l in lines:
+        layers.add(l.layer)
+    for c in contours:
+        layers.add(c.layer)
+
     return {
         "dxf_url": dxf_url,
         "preview_url": preview_url,
         "meta": {
             "image_width": w,
             "image_height": h,
-            "elements_count": len(elements),
-            "layers": list(set(e.class_name for e in elements)),
+            "elements_count": len(lines) + len(contours),
+            "layers": list(layers),
             "processing_time_seconds": round(processing_time, 2),
+            "floor_ys": detect_meta["floor_ys"],
+            "column_xs": detect_meta["column_xs"],
+            "window_rects": detect_meta["window_rects"],
         },
     }
 
@@ -147,11 +147,8 @@ def run_split_pipeline(
         report(base_progress, f"processing_part_{i + 1}")
 
         h, w = sub_img.shape[:2]
-        detections = facade_detector.detect_facades(sub_img)
-        segments = facade_segmentor.segment(sub_img, detections)
-        elements = vectorize_elements(sub_img, segments)
-        elements = regularize_elements(elements, (h, w))
-        dxf_bytes = build_dxf(elements, w, h)
+        trace_lines, trace_contours, _ = facade_detector.trace_edges(sub_img)
+        dxf_bytes = build_dxf_from_traces(trace_lines, trace_contours, w, h)
 
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         dxf_url = upload_bytes(
@@ -185,28 +182,18 @@ def run_detail_pipeline(
 
     report(10, "cropping_detail")
     detail = crop_region_fn(image, detail_region)
-    # Don't resize down for detail - keep high resolution
     detail = preprocess_image(detail, max_size=settings.MAX_IMAGE_SIZE)
     h, w = detail.shape[:2]
 
-    report(25, "detecting_elements")
-    detections = facade_detector.detect_facades(detail)
+    report(25, "tracing_edges")
+    trace_lines, trace_contours, _ = facade_detector.trace_edges(detail)
 
-    report(45, "segmenting")
-    segments = facade_segmentor.segment(detail, detections)
-
-    report(60, "vectorizing")
-    elements = vectorize_elements(detail, segments)
-
-    report(75, "regularizing")
-    elements = regularize_elements(elements, (h, w))
-
-    report(85, "generating_dxf")
-    dxf_bytes = build_dxf(elements, w, h)
+    report(60, "generating_dxf")
+    dxf_bytes = build_dxf_from_traces(trace_lines, trace_contours, w, h)
 
     preview_bytes = generate_preview(dxf_bytes)
 
-    report(95, "uploading")
+    report(90, "uploading")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     dxf_url = upload_bytes(
         settings.S3_BUCKET_RESULTS,
@@ -241,12 +228,10 @@ def run_auto_coding_pipeline(
         if progress_callback:
             progress_callback(progress, stage)
 
-    # Download existing DXF
     report(0, "downloading_dxf")
     bucket, key = _parse_s3_url(dxf_url)
     dxf_bytes = download_file(bucket, key)
 
-    # Download and analyze original image for element detection
     report(10, "downloading_image")
     img_bucket, img_key = _parse_s3_url(image_url)
     image_data = download_file(img_bucket, img_key)
@@ -254,31 +239,20 @@ def run_auto_coding_pipeline(
     image = preprocess_image(image)
     h, w = image.shape[:2]
 
-    report(20, "detecting_elements")
-    detections = facade_detector.detect_facades(image)
+    # Detect structure for placing dimension axes
+    report(20, "tracing_edges")
+    trace_lines, trace_contours, _ = facade_detector.trace_edges(image)
+    trace_lines, trace_contours = regularize_traces(trace_lines, trace_contours, w, h)
 
-    report(40, "segmenting_elements")
-    segments = facade_segmentor.segment(image, detections)
-
-    report(55, "vectorizing")
-    elements = vectorize_elements(image, segments)
-
-    report(65, "regularizing")
-    elements = regularize_elements(elements, (h, w))
-
-    # Generate auto coding config from detected elements
     report(75, "generating_coding")
-    coding_config = generate_auto_coding(elements, w, h)
+    coding_config = generate_auto_coding(trace_lines, trace_contours, w, h)
 
-    # Apply coding to DXF
     report(85, "applying_coding")
     coded_bytes = apply_manual_coding(dxf_bytes, coding_config, image_height)
 
-    # Generate preview
     report(90, "generating_preview")
     preview_bytes = generate_preview(coded_bytes)
 
-    # Upload results
     report(95, "uploading")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     coded_url = upload_bytes(
@@ -346,12 +320,10 @@ def run_manual_coding_pipeline(
     return {"dxf_url": coded_url, "preview_url": preview_url}
 
 
+
 def _parse_s3_url(url: str) -> tuple[str, str]:
     """Parse S3 URL into bucket and key."""
-    # Format: http://endpoint/bucket/key
     parts = url.split("/")
-    # Find bucket (first path segment after host)
-    # URL format: http://localhost:9000/bucket/path/to/file
     if len(parts) >= 5:
         bucket = parts[3]
         key = "/".join(parts[4:])
