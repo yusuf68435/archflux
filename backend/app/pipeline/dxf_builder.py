@@ -132,7 +132,7 @@ def add_dimensions_to_dxf(
     scale_factor: float = 1.0,
 ) -> bytes:
     """Add dimension annotations to an existing DXF."""
-    doc = ezdxf.read(io.BytesIO(dxf_bytes))
+    doc = ezdxf.read(io.StringIO(dxf_bytes.decode("utf-8")))
     msp = doc.modelspace()
 
     def transform_y(y: float) -> float:
@@ -206,7 +206,7 @@ def add_coding_to_dxf(
     image_height: int,
 ) -> bytes:
     """Add manual coding (axis lines, text) to an existing DXF."""
-    doc = ezdxf.read(io.BytesIO(dxf_bytes))
+    doc = ezdxf.read(io.StringIO(dxf_bytes.decode("utf-8")))
     msp = doc.modelspace()
 
     def transform_y(y: float) -> float:
@@ -261,7 +261,7 @@ def add_coding_to_dxf(
 
 def generate_preview(dxf_bytes: bytes) -> bytes:
     """Generate a PNG preview of the DXF file."""
-    doc = ezdxf.read(io.BytesIO(dxf_bytes))
+    doc = ezdxf.read(io.StringIO(dxf_bytes.decode("utf-8")))
 
     try:
         import matplotlib
