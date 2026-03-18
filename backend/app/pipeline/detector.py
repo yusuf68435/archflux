@@ -51,7 +51,7 @@ class FacadeDetector:
     def trace_edges(self, image: np.ndarray) -> tuple[list[TracedLine], list[TracedContour], dict]:
         h, w = image.shape[:2]
 
-        # Downscale to ~900px for processing speed
+        # ── Structural meta (floor/column/window grid) ──────────────────────
         scale = 1.0
         target = 900
         if max(h, w) > target:
@@ -62,18 +62,9 @@ class FacadeDetector:
             work = image.copy()
 
         wh, ww = work.shape[:2]
-
-        # 1. Building boundary
         top, bottom, left, right = self._find_building_bounds(work, wh, ww)
-
-        # 2. Floor lines (LSD horizontal segments)
         floor_ys = self._detect_floor_lines_lsd(work, top, bottom, left, right)
-
-        # 3. Column lines (LSD vertical segments)
         column_xs = self._detect_column_lines_lsd(work, top, bottom, left, right)
-
-        # 4. Windows (multi-evidence grid scoring or adaptive fallback)
-        # Always include building left/right as grid boundaries so grid covers full width
         grid_xs = sorted(set([float(left)] + column_xs + [float(right)]))
         if len(floor_ys) >= 2:
             windows = self._score_windows_from_grid(
@@ -82,76 +73,62 @@ class FacadeDetector:
         else:
             windows = self._detect_windows_adaptive(work, top, bottom, left, right)
 
-        # 5. Balcony detection
-        balconies = self._detect_balconies(work, top, bottom, left, right, floor_ys)
-
-        lines: list[TracedLine] = []
-        contours: list[TracedContour] = []
-
-        # Building outline polygon
-        contours.append(TracedContour(
-            points=[
-                (float(left), float(top)),
-                (float(right), float(top)),
-                (float(right), float(bottom)),
-                (float(left), float(bottom)),
-            ],
-            layer="outline",
-            closed=True,
-        ))
-
-        # Floor lines — full building width
-        for fy in floor_ys:
-            lines.append(TracedLine(
-                x1=float(left), y1=float(fy),
-                x2=float(right), y2=float(fy),
-                width=1.0, layer="structure",
-            ))
-
-        # Column lines — full building height
-        for cx in column_xs:
-            lines.append(TracedLine(
-                x1=float(cx), y1=float(top),
-                x2=float(cx), y2=float(bottom),
-                width=1.0, layer="structure",
-            ))
-
-        contours.extend(windows)
-        contours.extend(balconies)
-
-        # Build window rects before scaling
         window_rects = []
         for w_contour in windows:
             xs = [p[0] for p in w_contour.points]
             ys = [p[1] for p in w_contour.points]
             window_rects.append({
-                "x": min(xs), "y": min(ys),
-                "w": max(xs) - min(xs), "h": max(ys) - min(ys),
+                "x": min(xs) * scale, "y": min(ys) * scale,
+                "w": (max(xs) - min(xs)) * scale, "h": (max(ys) - min(ys)) * scale,
             })
 
-        # Scale back to original resolution
-        if scale > 1.0:
-            floor_ys = [y * scale for y in floor_ys]
-            column_xs = [x * scale for x in column_xs]
-            window_rects = [{
-                "x": r["x"] * scale, "y": r["y"] * scale,
-                "w": r["w"] * scale, "h": r["h"] * scale,
-            } for r in window_rects]
-            lines = [TracedLine(
-                x1=l.x1 * scale, y1=l.y1 * scale,
-                x2=l.x2 * scale, y2=l.y2 * scale,
-                width=l.width, layer=l.layer,
-            ) for l in lines]
-            contours = [TracedContour(
-                points=[(p[0] * scale, p[1] * scale) for p in c.points],
-                layer=c.layer, closed=c.closed,
-            ) for c in contours]
-
         detect_meta = {
-            "floor_ys": floor_ys,
-            "column_xs": column_xs,
+            "floor_ys": [y * scale for y in floor_ys],
+            "column_xs": [x * scale for x in column_xs],
             "window_rects": window_rects,
         }
+
+        # ── Pixel-level edge tracing (Canny → contours → DXF polylines) ─────
+        lines: list[TracedLine] = []
+        contours: list[TracedContour] = []
+
+        # Work at full resolution for detail quality
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
+
+        # Reduce noise while preserving edges
+        smooth = cv2.bilateralFilter(gray, d=7, sigmaColor=50, sigmaSpace=50)
+
+        # Adaptive Canny: thresholds derived from image median
+        med = float(np.median(smooth))
+        lo = max(10, int(med * 0.4))
+        hi = min(250, int(med * 1.2))
+        edges = cv2.Canny(smooth, lo, hi, apertureSize=3, L2gradient=True)
+
+        # Dilate slightly to connect broken edges
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        edges = cv2.dilate(edges, kernel, iterations=1)
+        edges = cv2.erode(edges, kernel, iterations=1)
+
+        # Extract all contours
+        raw_contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_TC89_L1)
+
+        for cnt in raw_contours:
+            if len(cnt) < 3:
+                continue
+            area = cv2.contourArea(cnt)
+            if area < 20:  # skip tiny noise contours
+                continue
+
+            # Simplify: epsilon controls smoothness vs detail trade-off
+            epsilon = max(1.0, 0.003 * cv2.arcLength(cnt, True))
+            approx = cv2.approxPolyDP(cnt, epsilon, False)
+
+            pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
+            if len(pts) < 2:
+                continue
+
+            closed = len(pts) >= 4 and area > 200
+            contours.append(TracedContour(points=pts, layer="detail", closed=closed))
 
         return lines, contours, detect_meta
 
