@@ -125,15 +125,21 @@ class FacadeDetector:
                 closed=True,
             ))
 
-        # ── GrabCut masking → XDoG detail edges ──────────────────────────────
-        # Run on work image (900px max) for speed, scale coords back to full-res
-        fg_mask = self._grabcut_mask(work, top, bottom, left, right)
-        gray_work = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY) if len(work.shape) == 3 else work.copy()
-        xdog_edges = self._xdog_edges(gray_work)
-        xdog_edges = cv2.bitwise_and(xdog_edges, fg_mask)
+        # ── HED deep edge detection → DETAIL contours ────────────────────────
+        # Run on downscaled image (500px) for speed
+        hed_max = 500
+        hed_scale = 1.0
+        if max(h, w) > hed_max:
+            hed_scale = max(h, w) / hed_max
+            hed_img = cv2.resize(image, (int(w / hed_scale), int(h / hed_scale)))
+        else:
+            hed_img = image.copy()
 
-        min_arc_px = max(wh, ww) * 0.012  # 1.2% of image dimension
-        raw_cnts, hier = cv2.findContours(xdog_edges, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1)
+        hed_edges = self._hed_edges(hed_img, threshold=0.25)
+        sh, sw = hed_edges.shape[:2]
+        min_arc_px = max(sh, sw) * 0.03
+
+        raw_cnts, hier = cv2.findContours(hed_edges, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1)
         for i, cnt in enumerate(raw_cnts):
             if len(cnt) < 2:
                 continue
@@ -141,12 +147,12 @@ class FacadeDetector:
             if arc < min_arc_px:
                 continue
             area = cv2.contourArea(cnt)
-            epsilon = max(0.3, 0.0015 * arc)
+            epsilon = max(0.5, 0.002 * arc)
             approx = cv2.approxPolyDP(cnt, epsilon, False)
-            pts = [(float(p[0][0]) * scale, float(p[0][1]) * scale) for p in approx]
+            pts = [(float(p[0][0]) * hed_scale, float(p[0][1]) * hed_scale) for p in approx]
             if len(pts) < 2:
                 continue
-            is_closed = len(pts) >= 4 and area > 60
+            is_closed = len(pts) >= 4 and area > 80
             if hier is not None and hier[0][i][2] >= 0:
                 is_closed = True
             contours.append(TracedContour(points=pts, layer="detail", closed=is_closed))
@@ -603,51 +609,60 @@ class FacadeDetector:
         peaks.sort()
         return peaks
 
-    def _grabcut_mask(self, image: np.ndarray, top: int, bottom: int,
-                      left: int, right: int) -> np.ndarray:
-        """Segment building from background using GrabCut with building bounds rect."""
+    # ─── HED deep edge detection ────────────────────────────────────────────
+
+    _hed_net = None
+
+    class _CropLayer:
+        """OpenCV DNN crop layer required by HED prototxt."""
+        def __init__(self, params, blobs):
+            self.startX = 0; self.startY = 0
+            self.endX = 0; self.endY = 0
+        def getMemoryShapes(self, inputs):
+            inputShape, targetShape = inputs[0], inputs[1]
+            batchSize, numChannels = inputShape[0], inputShape[1]
+            H, W = targetShape[2], targetShape[3]
+            self.startX = int((inputShape[3] - targetShape[3]) / 2)
+            self.startY = int((inputShape[2] - targetShape[2]) / 2)
+            self.endX = self.startX + W
+            self.endY = self.startY + H
+            return [[batchSize, numChannels, H, W]]
+        def forward(self, inputs):
+            return [inputs[0][:, :, self.startY:self.endY, self.startX:self.endX]]
+
+    def _load_hed(self):
+        """Load HED model (lazy, once)."""
+        if FacadeDetector._hed_net is not None:
+            return FacadeDetector._hed_net
+        import os
+        weights_dir = os.path.join(os.path.dirname(__file__), "..", "..", "weights")
+        proto = os.path.join(weights_dir, "hed_deploy.prototxt")
+        model = os.path.join(weights_dir, "hed_pretrained_bsds.caffemodel")
+        if not os.path.exists(model):
+            return None
+        cv2.dnn_registerLayer("Crop", FacadeDetector._CropLayer)
+        FacadeDetector._hed_net = cv2.dnn.readNetFromCaffe(proto, model)
+        return FacadeDetector._hed_net
+
+    def _hed_edges(self, image: np.ndarray, threshold: float = 0.25) -> np.ndarray:
+        """Run HED (Holistically-nested Edge Detection) → binary edge map."""
+        net = self._load_hed()
+        if net is None:
+            # Fallback: Canny if HED model not available
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+            return cv2.Canny(gray, 50, 150)
         h, w = image.shape[:2]
-        fallback = np.zeros((h, w), np.uint8)
-        fallback[top:bottom, left:right] = 255
-
-        rw = right - left
-        rh = bottom - top
-        if rw < 10 or rh < 10:
-            return fallback
-
-        try:
-            mask = np.zeros((h, w), np.uint8)
-            rect = (int(left), int(top), int(rw), int(rh))
-            bgd = np.zeros((1, 65), np.float64)
-            fgd = np.zeros((1, 65), np.float64)
-            cv2.grabCut(image, mask, rect, bgd, fgd, 5, cv2.GC_INIT_WITH_RECT)
-            fg = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
-            # If GrabCut collapsed (< 5% FG), fall back to rect
-            if fg.sum() < h * w * 0.05 * 255:
-                return fallback
-            # Dilate slightly to avoid cutting real edges at boundary
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-            return cv2.dilate(fg, k, iterations=2)
-        except Exception:
-            return fallback
-
-    def _xdog_edges(self, gray: np.ndarray,
-                    sigma: float = 0.5, k: float = 1.6,
-                    phi: float = 10.0, eps: float = 0.01) -> np.ndarray:
-        """Extended Difference of Gaussians — clean pencil/ink style edges.
-
-        XDoG(x) = G_σ(x) - G_{kσ}(x)  → soft-threshold → binary
-        """
-        g1 = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), sigma)
-        g2 = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), sigma * k)
-        dog = g1 - g2
-        # Soft threshold: pixels below eps become edges
-        xdog = np.where(dog >= eps, 1.0, 1.0 + np.tanh(phi * (dog - eps)))
-        xdog = ((1.0 - xdog) * 255).clip(0, 255).astype(np.uint8)
-        _, binary = cv2.threshold(xdog, 15, 255, cv2.THRESH_BINARY)
-        # Clean up noise
-        k3 = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        return cv2.morphologyEx(binary, cv2.MORPH_OPEN, k3, iterations=1)
+        blob = cv2.dnn.blobFromImage(
+            image, scalefactor=1.0, size=(w, h),
+            mean=(104.00698793, 116.66876762, 122.67891434),
+            swapRB=False, crop=False,
+        )
+        net.setInput(blob)
+        out = net.forward()[0, 0]
+        out = cv2.resize(out, (w, h))
+        out = (out * 255).clip(0, 255).astype(np.uint8)
+        _, binary = cv2.threshold(out, int(threshold * 255), 255, cv2.THRESH_BINARY)
+        return binary
 
     def _nms_boxes(self, boxes: list[tuple[int, int, int, int]],
                    iou_threshold: float = 0.3) -> list[tuple[int, int, int, int]]:

@@ -52,6 +52,8 @@ services:
       ALLOWED_ORIGINS: ${NEXTAUTH_URL}
       SENTRY_DSN: ${SENTRY_DSN:-}
       DEVICE: ${DEVICE:-cuda}
+    volumes:
+      - ../backend/weights:/app/weights:ro
     restart: always
 
   celery-worker:
@@ -65,6 +67,8 @@ services:
       API_KEY: ${API_KEY}
       SENTRY_DSN: ${SENTRY_DSN:-}
       DEVICE: ${DEVICE:-cuda}
+    volumes:
+      - ../backend/weights:/app/weights:ro
     restart: always
 
   nginx:
