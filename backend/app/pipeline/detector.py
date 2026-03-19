@@ -97,47 +97,13 @@ class FacadeDetector:
             "window_rects": window_rects,
         }
 
-        # ── Build semantic lines/contours from structural detection ──────────
+        # ── HED deep edge detection (primary output) ─────────────────────────
         lines: list[TracedLine] = []
         contours: list[TracedContour] = []
 
-        # Building outline
-        lines.append(TracedLine(x1=full_left,  y1=full_top,    x2=full_right, y2=full_top,    width=3.0, layer="outline"))
-        lines.append(TracedLine(x1=full_right, y1=full_top,    x2=full_right, y2=full_bottom, width=3.0, layer="outline"))
-        lines.append(TracedLine(x1=full_right, y1=full_bottom, x2=full_left,  y2=full_bottom, width=3.0, layer="outline"))
-        lines.append(TracedLine(x1=full_left,  y1=full_bottom, x2=full_left,  y2=full_top,    width=3.0, layer="outline"))
-
-        # Floor slab horizontal lines
-        for fy in full_floor_ys:
-            lines.append(TracedLine(x1=full_left, y1=fy, x2=full_right, y2=fy, width=2.0, layer="structure"))
-
-        # Column vertical lines
-        for cx in full_column_xs:
-            lines.append(TracedLine(x1=cx, y1=full_top, x2=cx, y2=full_bottom, width=2.0, layer="COLUMNS"))
-
-        # Window rectangles
-        for wr in window_rects:
-            wx1, wy1 = wr["x"], wr["y"]
-            wx2, wy2 = wx1 + wr["w"], wy1 + wr["h"]
-            contours.append(TracedContour(
-                points=[(wx1, wy1), (wx2, wy1), (wx2, wy2), (wx1, wy2)],
-                layer="WINDOWS",
-                closed=True,
-            ))
-
-        # ── HED deep edge detection → DETAIL contours ────────────────────────
-        # Run at high resolution for maximum detail
-        hed_max = 1024
-        hed_scale = 1.0
-        if max(h, w) > hed_max:
-            hed_scale = max(h, w) / hed_max
-            hed_img = cv2.resize(image, (int(w / hed_scale), int(h / hed_scale)))
-        else:
-            hed_img = image.copy()
-
-        hed_edges = self._hed_edges(hed_img, threshold=0.15)
-        sh, sw = hed_edges.shape[:2]
-        min_arc_px = max(sh, sw) * 0.015  # 1.5% — keep finer details
+        # Run HED at full resolution for maximum accuracy
+        hed_edges = self._hed_edges(image, threshold=0.12)
+        min_arc_px = max(h, w) * 0.008  # 0.8% — keep fine architectural details
 
         raw_cnts, hier = cv2.findContours(hed_edges, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1)
         for i, cnt in enumerate(raw_cnts):
@@ -147,12 +113,12 @@ class FacadeDetector:
             if arc < min_arc_px:
                 continue
             area = cv2.contourArea(cnt)
-            epsilon = max(0.3, 0.001 * arc)  # less simplification
+            epsilon = max(0.3, 0.0008 * arc)  # minimal simplification
             approx = cv2.approxPolyDP(cnt, epsilon, False)
-            pts = [(float(p[0][0]) * hed_scale, float(p[0][1]) * hed_scale) for p in approx]
+            pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
             if len(pts) < 2:
                 continue
-            is_closed = len(pts) >= 4 and area > 50
+            is_closed = len(pts) >= 4 and area > 30
             if hier is not None and hier[0][i][2] >= 0:
                 is_closed = True
             contours.append(TracedContour(points=pts, layer="detail", closed=is_closed))
