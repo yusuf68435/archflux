@@ -12,28 +12,28 @@ from app.pipeline.vectorizer import VectorElement
 
 # Semantic layer definitions: name -> (ACI color, lineweight in 1/100 mm)
 LAYERS = {
-    # ── New semantic layers ──────────────────────────────────────────────────
-    "BUILDING-OUTLINE": (1, 50),    # Red, 0.50mm   — true facade perimeter
-    "FLOOR-SLABS":      (3, 35),    # Green, 0.35mm — horizontal slab lines
-    "COLUMNS":          (6, 35),    # Magenta, 0.35mm — vertical structural lines
-    "WINDOWS":          (5, 18),    # Blue, 0.18mm  — window openings
-    "DOORS":            (1, 25),    # Red, 0.25mm   — door openings
-    "BALCONIES":        (4, 25),    # Cyan, 0.25mm  — balcony slabs & railings
-    "DIMENSIONS":       (4, 13),    # Cyan, 0.13mm  — dimension annotations
-    "GRID-AXES":        (8, 9),     # Gray, 0.09mm  — grid axis lines
-    "ANNOTATIONS":      (7, 13),    # White, 0.13mm — text labels
-    "REFERENCE":        (9, 9),     # Lt-gray, 0.09mm — border frame
-    # ── Legacy aliases (backward compat with coding step) ───────────────────
-    "OUTLINE":          (1, 50),
-    "STRUCTURE":        (3, 35),
-    "DETAIL":           (5, 18),
+    # ── All layers use dark colors for clean black-line output ───────────────
+    "BUILDING-OUTLINE": (250, 50),   # Black, 0.50mm — facade perimeter
+    "FLOOR-SLABS":      (250, 35),   # Black, 0.35mm — horizontal slab lines
+    "COLUMNS":          (250, 35),   # Black, 0.35mm — vertical structural lines
+    "WINDOWS":          (250, 18),   # Black, 0.18mm — window openings
+    "DOORS":            (250, 25),   # Black, 0.25mm — door openings
+    "BALCONIES":        (250, 25),   # Black, 0.25mm — balcony slabs & railings
+    "DIMENSIONS":       (250, 13),   # Black, 0.13mm — dimension annotations
+    "GRID-AXES":        (8, 9),      # Gray, 0.09mm  — grid axis lines
+    "ANNOTATIONS":      (250, 13),   # Black, 0.13mm — text labels
+    "REFERENCE":        (9, 9),      # Lt-gray, 0.09mm — border frame
+    # ── Legacy aliases ──────────────────────────────────────────────────────
+    "OUTLINE":          (250, 50),
+    "STRUCTURE":        (250, 35),
+    "DETAIL":           (250, 18),   # Black, 0.18mm — edge detail
     "GRID_LINES":       (8, 9),
-    "TEXT":             (7, 13),
-    "WALLS":            (7, 50),
-    "WINDOWS_OLD":      (3, 25),
-    "DOORS_OLD":        (1, 35),
-    "BALCONIES_OLD":    (5, 25),
-    "FLOOR_LINES":      (9, 25),
+    "TEXT":             (250, 13),
+    "WALLS":            (250, 50),
+    "WINDOWS_OLD":      (250, 25),
+    "DOORS_OLD":        (250, 35),
+    "BALCONIES_OLD":    (250, 25),
+    "FLOOR_LINES":      (250, 25),
 }
 
 # Map element class names to DXF layers (old pipeline compat)
@@ -315,6 +315,8 @@ def generate_preview(dxf_bytes: bytes) -> bytes:
         import matplotlib.pyplot as plt
 
         fig, ax = plt.subplots(figsize=(16, 12))
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("white")
         ctx = RenderContext(doc)
         out = MatplotlibBackend(ax)
         Frontend(ctx, out).draw_layout(doc.modelspace())
@@ -323,7 +325,8 @@ def generate_preview(dxf_bytes: bytes) -> bytes:
         ax.set_axis_off()
 
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", pad_inches=0.1)
+        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                    pad_inches=0.1, facecolor="white")
         plt.close(fig)
         return buf.getvalue()
     except ImportError:

@@ -97,28 +97,24 @@ class FacadeDetector:
             "window_rects": window_rects,
         }
 
-        # ── Pixel-level edge tracing ─────────────────────────────────────────
+        # ── Build semantic lines/contours from structural detection ──────────
         lines: list[TracedLine] = []
         contours: list[TracedContour] = []
 
-        # ── Structural lines from meta → semantic DXF layers ─────────────────
-        # Floor slab horizontal lines
-        for fy in full_floor_ys:
-            lines.append(TracedLine(
-                x1=full_left, y1=fy, x2=full_right, y2=fy,
-                width=2.0, layer="structure",
-            ))
-        # Column/wall vertical lines
-        for cx in full_column_xs:
-            lines.append(TracedLine(
-                x1=cx, y1=full_top, x2=cx, y2=full_bottom,
-                width=2.0, layer="COLUMNS",
-            ))
-        # Building outline rectangle
+        # Building outline
         lines.append(TracedLine(x1=full_left,  y1=full_top,    x2=full_right, y2=full_top,    width=3.0, layer="outline"))
         lines.append(TracedLine(x1=full_right, y1=full_top,    x2=full_right, y2=full_bottom, width=3.0, layer="outline"))
         lines.append(TracedLine(x1=full_right, y1=full_bottom, x2=full_left,  y2=full_bottom, width=3.0, layer="outline"))
         lines.append(TracedLine(x1=full_left,  y1=full_bottom, x2=full_left,  y2=full_top,    width=3.0, layer="outline"))
+
+        # Floor slab horizontal lines
+        for fy in full_floor_ys:
+            lines.append(TracedLine(x1=full_left, y1=fy, x2=full_right, y2=fy, width=2.0, layer="structure"))
+
+        # Column vertical lines
+        for cx in full_column_xs:
+            lines.append(TracedLine(x1=cx, y1=full_top, x2=cx, y2=full_bottom, width=2.0, layer="COLUMNS"))
+
         # Window rectangles
         for wr in window_rects:
             wx1, wy1 = wr["x"], wr["y"]
@@ -128,80 +124,6 @@ class FacadeDetector:
                 layer="WINDOWS",
                 closed=True,
             ))
-
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
-
-        # ── CLAHE contrast enhancement ───────────────────────────────────
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-
-        med = float(np.median(enhanced))
-
-        # ── Scale 1: Fine — bilateral preserves edges, moderate thresholds
-        fine = cv2.bilateralFilter(enhanced, d=7, sigmaColor=40, sigmaSpace=40)
-        edges_fine = cv2.Canny(fine,
-                               max(10, int(med * 0.3)),
-                               min(200, int(med * 0.9)),
-                               apertureSize=3, L2gradient=True)
-
-        # ── Scale 2: Coarse — strong smoothing for major structural edges
-        coarse = cv2.bilateralFilter(enhanced, d=11, sigmaColor=80, sigmaSpace=80)
-        edges_coarse = cv2.Canny(coarse,
-                                  max(20, int(med * 0.5)),
-                                  min(250, int(med * 1.5)),
-                                  apertureSize=3, L2gradient=True)
-
-        # ── Combine edge maps (2-scale only, no adaptive = less noise) ──
-        edges = cv2.bitwise_or(edges_fine, edges_coarse)
-
-        # ── Morphological: close small gaps ──────────────────────────────
-        close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_k, iterations=1)
-
-        # ── Contour extraction ───────────────────────────────────────────
-        raw_contours, hierarchy = cv2.findContours(
-            edges, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1
-        )
-
-        min_arc = 20.0  # filter out small noise fragments
-
-        for i, cnt in enumerate(raw_contours):
-            if len(cnt) < 2:
-                continue
-            arc = cv2.arcLength(cnt, True)
-            if arc < min_arc:
-                continue
-
-            area = cv2.contourArea(cnt)
-
-            # Moderate simplification — balance detail vs noise
-            epsilon = max(0.5, 0.002 * arc)
-            approx = cv2.approxPolyDP(cnt, epsilon, False)
-
-            pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
-            if len(pts) < 2:
-                continue
-
-            is_closed = len(pts) >= 4 and area > 150
-            if hierarchy is not None and hierarchy[0][i][2] >= 0:
-                is_closed = True
-
-            contours.append(TracedContour(points=pts, layer="detail", closed=is_closed))
-
-        # ── LSD straight lines → TracedLine objects ──────────────────────
-        lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
-        lsd_lines = lsd.detect(enhanced)[0]
-        if lsd_lines is not None:
-            min_len = max(h, w) * 0.025  # 2.5% — only meaningful lines
-            for seg in lsd_lines:
-                x1, y1, x2, y2 = seg[0]
-                length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-                if length >= min_len:
-                    lines.append(TracedLine(
-                        x1=float(x1), y1=float(y1),
-                        x2=float(x2), y2=float(y2),
-                        width=1.0, layer="detail",
-                    ))
 
         return lines, contours, detect_meta
 
