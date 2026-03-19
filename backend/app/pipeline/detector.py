@@ -126,8 +126,8 @@ class FacadeDetector:
             ))
 
         # ── HED deep edge detection → DETAIL contours ────────────────────────
-        # Run on downscaled image (500px) for speed
-        hed_max = 500
+        # Run at high resolution for maximum detail
+        hed_max = 1024
         hed_scale = 1.0
         if max(h, w) > hed_max:
             hed_scale = max(h, w) / hed_max
@@ -135,9 +135,9 @@ class FacadeDetector:
         else:
             hed_img = image.copy()
 
-        hed_edges = self._hed_edges(hed_img, threshold=0.25)
+        hed_edges = self._hed_edges(hed_img, threshold=0.15)
         sh, sw = hed_edges.shape[:2]
-        min_arc_px = max(sh, sw) * 0.03
+        min_arc_px = max(sh, sw) * 0.015  # 1.5% — keep finer details
 
         raw_cnts, hier = cv2.findContours(hed_edges, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1)
         for i, cnt in enumerate(raw_cnts):
@@ -147,12 +147,12 @@ class FacadeDetector:
             if arc < min_arc_px:
                 continue
             area = cv2.contourArea(cnt)
-            epsilon = max(0.5, 0.002 * arc)
+            epsilon = max(0.3, 0.001 * arc)  # less simplification
             approx = cv2.approxPolyDP(cnt, epsilon, False)
             pts = [(float(p[0][0]) * hed_scale, float(p[0][1]) * hed_scale) for p in approx]
             if len(pts) < 2:
                 continue
-            is_closed = len(pts) >= 4 and area > 80
+            is_closed = len(pts) >= 4 and area > 50
             if hier is not None and hier[0][i][2] >= 0:
                 is_closed = True
             contours.append(TracedContour(points=pts, layer="detail", closed=is_closed))
