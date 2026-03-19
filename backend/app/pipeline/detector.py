@@ -125,6 +125,32 @@ class FacadeDetector:
                 closed=True,
             ))
 
+        # ── GrabCut masking → XDoG detail edges ──────────────────────────────
+        # Run on work image (900px max) for speed, scale coords back to full-res
+        fg_mask = self._grabcut_mask(work, top, bottom, left, right)
+        gray_work = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY) if len(work.shape) == 3 else work.copy()
+        xdog_edges = self._xdog_edges(gray_work)
+        xdog_edges = cv2.bitwise_and(xdog_edges, fg_mask)
+
+        min_arc_px = max(wh, ww) * 0.012  # 1.2% of image dimension
+        raw_cnts, hier = cv2.findContours(xdog_edges, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_TC89_L1)
+        for i, cnt in enumerate(raw_cnts):
+            if len(cnt) < 2:
+                continue
+            arc = cv2.arcLength(cnt, True)
+            if arc < min_arc_px:
+                continue
+            area = cv2.contourArea(cnt)
+            epsilon = max(0.3, 0.0015 * arc)
+            approx = cv2.approxPolyDP(cnt, epsilon, False)
+            pts = [(float(p[0][0]) * scale, float(p[0][1]) * scale) for p in approx]
+            if len(pts) < 2:
+                continue
+            is_closed = len(pts) >= 4 and area > 60
+            if hier is not None and hier[0][i][2] >= 0:
+                is_closed = True
+            contours.append(TracedContour(points=pts, layer="detail", closed=is_closed))
+
         return lines, contours, detect_meta
 
     # ─── Building boundary ────────────────────────────────────────────────────
@@ -576,6 +602,52 @@ class FacadeDetector:
         peaks = peaks[:max_peaks]
         peaks.sort()
         return peaks
+
+    def _grabcut_mask(self, image: np.ndarray, top: int, bottom: int,
+                      left: int, right: int) -> np.ndarray:
+        """Segment building from background using GrabCut with building bounds rect."""
+        h, w = image.shape[:2]
+        fallback = np.zeros((h, w), np.uint8)
+        fallback[top:bottom, left:right] = 255
+
+        rw = right - left
+        rh = bottom - top
+        if rw < 10 or rh < 10:
+            return fallback
+
+        try:
+            mask = np.zeros((h, w), np.uint8)
+            rect = (int(left), int(top), int(rw), int(rh))
+            bgd = np.zeros((1, 65), np.float64)
+            fgd = np.zeros((1, 65), np.float64)
+            cv2.grabCut(image, mask, rect, bgd, fgd, 5, cv2.GC_INIT_WITH_RECT)
+            fg = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
+            # If GrabCut collapsed (< 5% FG), fall back to rect
+            if fg.sum() < h * w * 0.05 * 255:
+                return fallback
+            # Dilate slightly to avoid cutting real edges at boundary
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            return cv2.dilate(fg, k, iterations=2)
+        except Exception:
+            return fallback
+
+    def _xdog_edges(self, gray: np.ndarray,
+                    sigma: float = 0.5, k: float = 1.6,
+                    phi: float = 10.0, eps: float = 0.01) -> np.ndarray:
+        """Extended Difference of Gaussians — clean pencil/ink style edges.
+
+        XDoG(x) = G_σ(x) - G_{kσ}(x)  → soft-threshold → binary
+        """
+        g1 = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), sigma)
+        g2 = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), sigma * k)
+        dog = g1 - g2
+        # Soft threshold: pixels below eps become edges
+        xdog = np.where(dog >= eps, 1.0, 1.0 + np.tanh(phi * (dog - eps)))
+        xdog = ((1.0 - xdog) * 255).clip(0, 255).astype(np.uint8)
+        _, binary = cv2.threshold(xdog, 15, 255, cv2.THRESH_BINARY)
+        # Clean up noise
+        k3 = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        return cv2.morphologyEx(binary, cv2.MORPH_OPEN, k3, iterations=1)
 
     def _nms_boxes(self, boxes: list[tuple[int, int, int, int]],
                    iou_threshold: float = 0.3) -> list[tuple[int, int, int, int]]:
